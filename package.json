@@ -1,0 +1,55 @@
+{
+  "name": "chat-adapter-imessage",
+  "version": "0.1.0",
+  "description": "iMessage adapter for Chat SDK",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist coverage"
+  },
+  "peerDependencies": {
+    "chat": "^4.14.0"
+  },
+  "dependencies": {
+    "@chat-adapter/shared": "^4.15.0",
+    "@photon-ai/advanced-imessage-kit": "^1.14.3",
+    "@photon-ai/imessage-kit": "^2.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@vitest/coverage-v8": "^4.0.18",
+    "chat": "^4.15.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  },
+  "packageManager": "pnpm@10.30.3",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "chat-sdk",
+    "chat-adapter",
+    "imessage",
+    "sms",
+    "bot",
+    "adapter"
+  ],
+  "license": "MIT"
+}
