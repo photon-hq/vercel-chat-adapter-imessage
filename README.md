@@ -128,9 +128,9 @@ export async function GET(request: Request): Promise<Response> {
 
 This runs every 9 minutes, ensuring overlap with the 10-minute listener duration.
 
-### 3. Add environment variables
+### 3. Environment variables
 
-Add `CRON_SECRET` to your Vercel project settings.
+`CRON_SECRET` is automatically added by Vercel when you configure cron jobs.
 
 ## Configuration
 
