@@ -69,7 +69,7 @@ Remote mode connects to a [Photon](https://photon.codes) iMessage server, which 
 
 ### Local mode
 
-Local mode requires the adapter to run directly on a macOS machine with iMessage. It uses `@photon-ai/imessage-kit` to read from the local `chat.db` database and send messages via AppleScript.
+Local mode requires the adapter to run directly on a macOS machine with iMessage. It uses Apple's native APIs — reading from the local `chat.db` database and sending messages via AppleScript — with no external server required.
 
 1. Grant **Full Disk Access** to your terminal or application in **System Settings > Privacy & Security > Full Disk Access**
 2. Ensure iMessage is signed in and working on the Mac
