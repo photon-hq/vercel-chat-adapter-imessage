@@ -1,6 +1,6 @@
 {
   "name": "chat-adapter-imessage",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "iMessage adapter for Chat SDK",
   "type": "module",
   "main": "./dist/index.js",
@@ -51,5 +51,14 @@
     "bot",
     "adapter"
   ],
+  "author": "photon",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/photon-hq/vercel-chat-adapter-imessage.git"
+  },
+  "homepage": "https://github.com/photon-hq/vercel-chat-adapter-imessage",
+  "bugs": {
+    "url": "https://github.com/photon-hq/vercel-chat-adapter-imessage/issues"
+  },
   "license": "MIT"
 }
