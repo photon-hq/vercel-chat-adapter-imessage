@@ -55,6 +55,15 @@ bot.onNewMention(async (thread, message) => {
   await thread.post("Hello from iMessage!");
 });
 ```
+## AI Agent Skill
+
+An agent skill for this adapter is available in the [photon-hq/skills](https://github.com/photon-hq/skills ) repository. It provides a comprehensive, source-accurate reference that enables AI coding assistants (Cursor, Claude Code, Copilot, and others) to build with this adapter without needing to read the source.
+
+```bash
+npx skills add photon-hq/skills --skill chat-adapter-imessage
+```
+
+The skill covers setup, both local and remote modes, all adapter methods, type definitions, webhook payload shapes, and common pitfalls.
 
 ## Setup
 
