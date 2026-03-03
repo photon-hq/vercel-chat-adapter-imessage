@@ -55,6 +55,15 @@ bot.onNewMention(async (thread, message) => {
   await thread.post("Hello from iMessage!");
 });
 ```
+## AI Agent Skill
+
+An agent skill for this adapter is available in the [photon-hq/skills](https://github.com/photon-hq/skills ) repository. It provides a comprehensive, source-accurate reference that enables AI coding assistants (Cursor, Claude Code, Copilot, and others) to build with this adapter without needing to read the source.
+
+```bash
+npx skills add photon-hq/skills --skill vercel-chat-adapter
+```
+
+The skill covers setup, both local and remote modes, all adapter methods, type definitions, webhook payload shapes, and common pitfalls.
 
 ## Setup
 
@@ -262,16 +271,6 @@ iMessage uses tapbacks instead of emoji reactions. The adapter maps standard emo
 - Verify the server URL is correct and accessible
 - Check that the API key matches your Photon iMessage service credentials
 - Confirm your Photon subscription is active
-
-## AI Agent Skill
-
-An agent skill for this adapter is available in the [photon-hq/skills](https://github.com/photon-hq/skills ) repository. It provides a comprehensive, source-accurate reference that enables AI coding assistants (Cursor, Claude Code, Copilot, and others) to build with this adapter without needing to read the source.
-
-```bash
-npx skills add photon-hq/skills --skill vercel-chat-adapter
-```
-
-The skill covers setup, both local and remote modes, all adapter methods, type definitions, webhook payload shapes, and common pitfalls.
 
 ## License
 
