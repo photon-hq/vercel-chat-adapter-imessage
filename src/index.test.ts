@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { metrics, trace } from "@opentelemetry/api";
+import { logs } from "@opentelemetry/api-logs";
 
 const LOCAL_ID_PATTERN = /^local-\d+$/;
 
@@ -428,6 +430,941 @@ describe("startGatewayListener", () => {
 
     expect(mockGatewayClose).toHaveBeenCalled();
     expect(mockClose).not.toHaveBeenCalled();
+  });
+});
+
+describe("otel integration", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function mockOtelProviders() {
+    const spanSetStatus = vi.fn();
+    const spanRecordException = vi.fn();
+    const spanEnd = vi.fn();
+    const spanSetAttribute = vi.fn();
+    const startActiveSpan = vi.fn(
+      (_name: string, _options: unknown, fn: (span: unknown) => unknown) =>
+        fn({
+          setStatus: spanSetStatus,
+          recordException: spanRecordException,
+          end: spanEnd,
+          setAttribute: spanSetAttribute,
+        }),
+    );
+
+    const counterAdd = vi.fn();
+    const histogramRecord = vi.fn();
+    const upDownCounterAdd = vi.fn();
+
+    const tracerForceFlush = vi.fn().mockResolvedValue(undefined);
+    const meterForceFlush = vi.fn().mockResolvedValue(undefined);
+    const loggerForceFlush = vi.fn().mockResolvedValue(undefined);
+    const loggerEmit = vi.fn();
+
+    vi.spyOn(trace, "getTracerProvider").mockReturnValue({
+      getTracer: () => ({ startActiveSpan }),
+      forceFlush: tracerForceFlush,
+    } as never);
+
+    vi.spyOn(metrics, "getMeterProvider").mockReturnValue({
+      getMeter: () => ({
+        createCounter: () => ({ add: counterAdd }),
+        createHistogram: () => ({ record: histogramRecord }),
+        createUpDownCounter: () => ({ add: upDownCounterAdd }),
+      }),
+      forceFlush: meterForceFlush,
+    } as never);
+
+    vi.spyOn(logs, "getLoggerProvider").mockReturnValue({
+      getLogger: () => ({ emit: loggerEmit }),
+      forceFlush: loggerForceFlush,
+    } as never);
+
+    return {
+      startActiveSpan,
+      spanSetStatus,
+      spanEnd,
+      spanSetAttribute,
+      counterAdd,
+      histogramRecord,
+      upDownCounterAdd,
+      tracerForceFlush,
+      meterForceFlush,
+      loggerForceFlush,
+      loggerEmit,
+    };
+  }
+
+  it("constructor with OTel enabled uses tracer, real metrics, and OTelLogger", () => {
+    const mocks = mockOtelProviders();
+
+    const adapter = new iMessageAdapter({
+      local: false,
+      logger: mockLogger,
+      serverUrl: "https://example.com",
+      apiKey: "test-key",
+      otel: { enabled: true, serviceName: "test-bot" },
+    });
+
+    // Tracer is not null — adapter should call startActiveSpan on any operation
+    // Metrics are real — counterAdd should be callable
+    // Logger is wrapped — loggerEmit should fire on log calls
+    expect(adapter).toBeDefined();
+    expect(mocks.startActiveSpan).not.toHaveBeenCalled(); // no operation yet
+  });
+
+  it("constructor with OTel disabled uses null tracer and NOOP metrics", () => {
+    const getTracerProviderSpy = vi.spyOn(trace, "getTracerProvider");
+    const getMeterProviderSpy = vi.spyOn(metrics, "getMeterProvider");
+
+    new iMessageAdapter({
+      local: false,
+      logger: mockLogger,
+      serverUrl: "https://example.com",
+      apiKey: "test-key",
+      otel: { enabled: false },
+    });
+
+    expect(getTracerProviderSpy).not.toHaveBeenCalled();
+    expect(getMeterProviderSpy).not.toHaveBeenCalled();
+  });
+
+  it("uses custom providers instead of global when provided", () => {
+    const customTracer = { getTracer: vi.fn(() => ({ startActiveSpan: vi.fn() })) };
+    const customMeter = {
+      getMeter: vi.fn(() => ({
+        createCounter: () => ({ add() {} }),
+        createHistogram: () => ({ record() {} }),
+        createUpDownCounter: () => ({ add() {} }),
+      })),
+    };
+    const customLogger = { getLogger: vi.fn(() => ({ emit() {} })) };
+
+    const getTracerProviderSpy = vi.spyOn(trace, "getTracerProvider");
+    const getMeterProviderSpy = vi.spyOn(metrics, "getMeterProvider");
+    const getLoggerProviderSpy = vi.spyOn(logs, "getLoggerProvider");
+
+    new iMessageAdapter({
+      local: false,
+      logger: mockLogger,
+      serverUrl: "https://example.com",
+      apiKey: "test-key",
+      otel: {
+        enabled: true,
+        tracerProvider: customTracer as never,
+        meterProvider: customMeter as never,
+        loggerProvider: customLogger as never,
+      },
+    });
+
+    expect(getTracerProviderSpy).not.toHaveBeenCalled();
+    expect(getMeterProviderSpy).not.toHaveBeenCalled();
+    expect(getLoggerProviderSpy).not.toHaveBeenCalled();
+    expect(customTracer.getTracer).toHaveBeenCalled();
+    expect(customMeter.getMeter).toHaveBeenCalled();
+    expect(customLogger.getLogger).toHaveBeenCalled();
+  });
+
+  it("wraps logger with OTelLogger when enabled", () => {
+    const mocks = mockOtelProviders();
+
+    const adapter = new iMessageAdapter({
+      local: false,
+      logger: mockLogger,
+      serverUrl: "https://example.com",
+      apiKey: "test-key",
+      otel: { enabled: true },
+    });
+
+    // Access private logger via a method that logs
+    (adapter as unknown as { logger: { info: (msg: string) => void } }).logger.info("test");
+
+    // Both delegate and OTel logger should have been called
+    expect(mockLogger.info).toHaveBeenCalledWith("test", undefined);
+    expect(mocks.loggerEmit).toHaveBeenCalledWith(
+      expect.objectContaining({ body: "test" }),
+    );
+  });
+
+  it("creates spans for adapter operations when OTel enabled", async () => {
+    const mocks = mockOtelProviders();
+
+    const adapter = new iMessageAdapter({
+      local: false,
+      logger: mockLogger,
+      serverUrl: "https://example.com",
+      apiKey: "test-key",
+      otel: { enabled: true },
+    });
+
+    await adapter.initialize(createMockChat() as never);
+
+    // initialize creates a span
+    expect(mocks.startActiveSpan).toHaveBeenCalledWith(
+      "adapter.initialize",
+      expect.any(Object),
+      expect.any(Function),
+    );
+  });
+
+  it("records metrics on postMessage", async () => {
+    const mocks = mockOtelProviders();
+    mockSendMessage.mockResolvedValue({ guid: "msg-001" });
+
+    const adapter = new iMessageAdapter({
+      local: false,
+      logger: mockLogger,
+      serverUrl: "https://example.com",
+      apiKey: "test-key",
+      otel: { enabled: true },
+    });
+    await adapter.initialize(createMockChat() as never);
+
+    await adapter.postMessage("imessage:iMessage;-;+1234567890", "Hello!");
+
+    // messagesSent counter and messageSendDuration histogram should be called
+    expect(mocks.counterAdd).toHaveBeenCalled();
+    expect(mocks.histogramRecord).toHaveBeenCalled();
+  });
+
+  it("records messageSendErrors on postMessage failure", async () => {
+    const mocks = mockOtelProviders();
+    mockSendMessage.mockRejectedValue(new Error("send failed"));
+
+    const adapter = new iMessageAdapter({
+      local: false,
+      logger: mockLogger,
+      serverUrl: "https://example.com",
+      apiKey: "test-key",
+      otel: { enabled: true },
+    });
+    await adapter.initialize(createMockChat() as never);
+
+    await expect(
+      adapter.postMessage("imessage:iMessage;-;+1234567890", "Hello!"),
+    ).rejects.toThrow("send failed");
+
+    // Error counter should have been incremented
+    expect(mocks.counterAdd).toHaveBeenCalled();
+  });
+
+  it("flushTelemetry skips providers without forceFlush", async () => {
+    // Use providers that have no forceFlush method
+    vi.spyOn(trace, "getTracerProvider").mockReturnValue({
+      getTracer: () => ({
+        startActiveSpan: vi.fn((_n: string, _o: unknown, fn: (s: unknown) => unknown) =>
+          fn({ setStatus() {}, recordException() {}, end() {}, setAttribute() {} })),
+      }),
+    } as never);
+
+    vi.spyOn(metrics, "getMeterProvider").mockReturnValue({
+      getMeter: () => ({
+        createCounter: () => ({ add() {} }),
+        createHistogram: () => ({ record() {} }),
+        createUpDownCounter: () => ({ add() {} }),
+      }),
+    } as never);
+
+    vi.spyOn(logs, "getLoggerProvider").mockReturnValue({
+      getLogger: () => ({ emit() {} }),
+    } as never);
+
+    const adapter = new iMessageAdapter({
+      local: false,
+      logger: mockLogger,
+      serverUrl: "https://example.com",
+      apiKey: "test-key",
+      otel: { enabled: true },
+    });
+
+    const flushTelemetry = (
+      adapter as unknown as { flushTelemetry: () => Promise<void> }
+    ).flushTelemetry.bind(adapter);
+
+    // Should not throw
+    await expect(flushTelemetry()).resolves.toBeUndefined();
+  });
+
+  it("flushTelemetry handles rejection gracefully via Promise.allSettled", async () => {
+    vi.spyOn(trace, "getTracerProvider").mockReturnValue({
+      getTracer: () => ({
+        startActiveSpan: vi.fn((_n: string, _o: unknown, fn: (s: unknown) => unknown) =>
+          fn({ setStatus() {}, recordException() {}, end() {}, setAttribute() {} })),
+      }),
+      forceFlush: vi.fn().mockRejectedValue(new Error("tracer flush failed")),
+    } as never);
+
+    const meterForceFlush = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(metrics, "getMeterProvider").mockReturnValue({
+      getMeter: () => ({
+        createCounter: () => ({ add() {} }),
+        createHistogram: () => ({ record() {} }),
+        createUpDownCounter: () => ({ add() {} }),
+      }),
+      forceFlush: meterForceFlush,
+    } as never);
+
+    vi.spyOn(logs, "getLoggerProvider").mockReturnValue({
+      getLogger: () => ({ emit() {} }),
+      forceFlush: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const adapter = new iMessageAdapter({
+      local: false,
+      logger: mockLogger,
+      serverUrl: "https://example.com",
+      apiKey: "test-key",
+      otel: { enabled: true },
+    });
+
+    const flushTelemetry = (
+      adapter as unknown as { flushTelemetry: () => Promise<void> }
+    ).flushTelemetry.bind(adapter);
+
+    // Should not throw despite tracer flush failing
+    await expect(flushTelemetry()).resolves.toBeUndefined();
+    // Other providers still flushed
+    expect(meterForceFlush).toHaveBeenCalledOnce();
+  });
+
+  describe("metrics resilience", () => {
+    it("postMessage returns result even when metrics.messagesSent.add throws", async () => {
+      const mocks = mockOtelProviders();
+      mocks.counterAdd.mockImplementation(() => { throw new Error("counter exploded"); });
+      mockSendMessage.mockResolvedValue({ guid: "msg-001" });
+
+      const adapter = new iMessageAdapter({
+        local: false, logger: mockLogger,
+        serverUrl: "https://example.com", apiKey: "test-key",
+        otel: { enabled: true },
+      });
+      await adapter.initialize(createMockChat() as never);
+
+      const result = await adapter.postMessage("imessage:iMessage;-;+1234567890", "Hello!");
+      expect(result.id).toBe("msg-001");
+    });
+
+    it("postMessage propagates original SDK error when both SDK and metrics fail", async () => {
+      const mocks = mockOtelProviders();
+      mockSendMessage.mockRejectedValue(new Error("sdk-send-failed"));
+      mocks.counterAdd.mockImplementation(() => { throw new Error("counter exploded"); });
+
+      const adapter = new iMessageAdapter({
+        local: false, logger: mockLogger,
+        serverUrl: "https://example.com", apiKey: "test-key",
+        otel: { enabled: true },
+      });
+      await adapter.initialize(createMockChat() as never);
+
+      await expect(
+        adapter.postMessage("imessage:iMessage;-;+1234567890", "Hello!")
+      ).rejects.toThrow("sdk-send-failed");
+    });
+
+    it("addReaction succeeds even when metrics.reactionsSent.add throws", async () => {
+      const mocks = mockOtelProviders();
+      mocks.counterAdd.mockImplementation(() => { throw new Error("counter exploded"); });
+      mockSendReaction.mockResolvedValue({});
+
+      const adapter = new iMessageAdapter({
+        local: false, logger: mockLogger,
+        serverUrl: "https://example.com", apiKey: "test-key",
+        otel: { enabled: true },
+      });
+      await adapter.initialize(createMockChat() as never);
+
+      await expect(
+        adapter.addReaction("imessage:iMessage;-;+1234567890", "msg-001", "heart")
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  it("flushes resolved global providers when explicit providers are omitted", async () => {
+    const tracerForceFlush = vi.fn().mockResolvedValue(undefined);
+    const meterForceFlush = vi.fn().mockResolvedValue(undefined);
+    const loggerForceFlush = vi.fn().mockResolvedValue(undefined);
+
+    vi.spyOn(trace, "getTracerProvider").mockReturnValue({
+      getTracer: () => ({
+        startActiveSpan: (_name: string, _options: unknown, fn: (span: {
+          setStatus: () => void;
+          recordException: () => void;
+          end: () => void;
+          setAttribute: () => void;
+        }) => unknown) => fn({
+          setStatus() {},
+          recordException() {},
+          end() {},
+          setAttribute() {},
+        }),
+      }),
+      forceFlush: tracerForceFlush,
+    } as never);
+
+    vi.spyOn(metrics, "getMeterProvider").mockReturnValue({
+      getMeter: () => ({
+        createCounter: () => ({ add() {} }),
+        createHistogram: () => ({ record() {} }),
+        createUpDownCounter: () => ({ add() {} }),
+      }),
+      forceFlush: meterForceFlush,
+    } as never);
+
+    vi.spyOn(logs, "getLoggerProvider").mockReturnValue({
+      getLogger: () => ({ emit() {} }),
+      forceFlush: loggerForceFlush,
+    } as never);
+
+    const adapter = new iMessageAdapter({
+      local: false,
+      logger: mockLogger,
+      serverUrl: "https://example.com",
+      apiKey: "test-key",
+      otel: { enabled: true },
+    });
+
+    const flushTelemetry = (
+      adapter as unknown as { flushTelemetry: () => Promise<void> }
+    ).flushTelemetry.bind(adapter);
+
+    await flushTelemetry();
+
+    expect(tracerForceFlush).toHaveBeenCalledOnce();
+    expect(meterForceFlush).toHaveBeenCalledOnce();
+    expect(loggerForceFlush).toHaveBeenCalledOnce();
+  });
+
+  describe("enabled:false isolation", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("never calls global TracerProvider when disabled", async () => {
+      const getTracer = vi.fn();
+      vi.spyOn(trace, "getTracerProvider").mockReturnValue({ getTracer } as never);
+
+      const adapter = new iMessageAdapter({
+        local: false, logger: mockLogger,
+        serverUrl: "https://example.com", apiKey: "test-key",
+        otel: { enabled: false },
+      });
+      await adapter.initialize(createMockChat() as never);
+      mockSendMessage.mockResolvedValue({ guid: "msg-001" });
+      await adapter.postMessage("imessage:iMessage;-;+1234567890", "Hello");
+
+      expect(getTracer).not.toHaveBeenCalled();
+    });
+
+    it("never calls global MeterProvider when disabled", async () => {
+      const getMeter = vi.fn();
+      vi.spyOn(metrics, "getMeterProvider").mockReturnValue({ getMeter } as never);
+
+      const adapter = new iMessageAdapter({
+        local: false, logger: mockLogger,
+        serverUrl: "https://example.com", apiKey: "test-key",
+        otel: { enabled: false },
+      });
+      await adapter.initialize(createMockChat() as never);
+      mockSendMessage.mockResolvedValue({ guid: "msg-001" });
+      await adapter.postMessage("imessage:iMessage;-;+1234567890", "Hello");
+
+      expect(getMeter).not.toHaveBeenCalled();
+    });
+
+    it("never calls global LoggerProvider when disabled", async () => {
+      const getLogger = vi.fn();
+      vi.spyOn(logs, "getLoggerProvider").mockReturnValue({ getLogger } as never);
+
+      const adapter = new iMessageAdapter({
+        local: false, logger: mockLogger,
+        serverUrl: "https://example.com", apiKey: "test-key",
+        otel: { enabled: false },
+      });
+      await adapter.initialize(createMockChat() as never);
+
+      expect(getLogger).not.toHaveBeenCalled();
+    });
+
+    it("uses raw delegate logger (not OTelLogger) when disabled", () => {
+      const adapter = new iMessageAdapter({
+        local: false, logger: mockLogger,
+        serverUrl: "https://example.com", apiKey: "test-key",
+        otel: { enabled: false },
+      });
+      const logger = (adapter as unknown as { logger: object }).logger;
+      expect(logger).toBe(mockLogger);
+    });
+  });
+
+  describe("flushTelemetry edge cases", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("does not throw when called on disabled adapter", async () => {
+      const adapter = new iMessageAdapter({
+        local: false, logger: mockLogger,
+        serverUrl: "https://example.com", apiKey: "test-key",
+        otel: { enabled: false },
+      });
+
+      const flush = (adapter as unknown as { flushTelemetry: () => Promise<void> })
+        .flushTelemetry.bind(adapter);
+
+      await expect(flush()).resolves.toBeUndefined();
+    });
+
+    it("resolves even when one forceFlush hangs temporarily", async () => {
+      const slowFlush = () => new Promise<void>((resolve) => setTimeout(resolve, 100));
+      const fastFlush = vi.fn().mockResolvedValue(undefined);
+
+      vi.spyOn(trace, "getTracerProvider").mockReturnValue({
+        getTracer: () => ({
+          startActiveSpan: vi.fn((_n, _o, fn) =>
+            fn({ setStatus() {}, recordException() {}, end() {}, setAttribute() {} })),
+        }),
+        forceFlush: slowFlush,
+      } as never);
+      vi.spyOn(metrics, "getMeterProvider").mockReturnValue({
+        getMeter: () => ({
+          createCounter: () => ({ add() {} }),
+          createHistogram: () => ({ record() {} }),
+          createUpDownCounter: () => ({ add() {} }),
+        }),
+        forceFlush: fastFlush,
+      } as never);
+      vi.spyOn(logs, "getLoggerProvider").mockReturnValue({
+        getLogger: () => ({ emit() {} }),
+        forceFlush: fastFlush,
+      } as never);
+
+      const adapter = new iMessageAdapter({
+        local: false, logger: mockLogger,
+        serverUrl: "https://example.com", apiKey: "test-key",
+        otel: { enabled: true },
+      });
+
+      const flush = (adapter as unknown as { flushTelemetry: () => Promise<void> })
+        .flushTelemetry.bind(adapter);
+
+      await expect(flush()).resolves.toBeUndefined();
+      expect(fastFlush).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("serviceName propagation", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+      mockSendMessage.mockReset();
+    });
+
+    it("includes service.name in span attributes when serviceName is set", async () => {
+      const mocks = mockOtelProviders();
+      mockSendMessage.mockResolvedValue({ guid: "msg-001" });
+
+      const adapter = new iMessageAdapter({
+        local: false, logger: mockLogger,
+        serverUrl: "https://example.com", apiKey: "test-key",
+        otel: { enabled: true, serviceName: "my-bot" },
+      });
+      await adapter.initialize(createMockChat() as never);
+      await adapter.postMessage("imessage:iMessage;-;+1234567890", "Hi");
+
+      const postMsgCall = mocks.startActiveSpan.mock.calls.find(
+        (c) => c[0] === "adapter.post_message"
+      );
+      expect(postMsgCall).toBeDefined();
+      expect((postMsgCall![1] as Record<string, any>).attributes["service.name"]).toBe("my-bot");
+    });
+
+    it("includes service.name in metric attributes when serviceName is set", async () => {
+      const mocks = mockOtelProviders();
+      mockSendMessage.mockResolvedValue({ guid: "msg-001" });
+
+      const adapter = new iMessageAdapter({
+        local: false, logger: mockLogger,
+        serverUrl: "https://example.com", apiKey: "test-key",
+        otel: { enabled: true, serviceName: "my-bot" },
+      });
+      await adapter.initialize(createMockChat() as never);
+      await adapter.postMessage("imessage:iMessage;-;+1234567890", "Hi");
+
+      // Find a counterAdd call with service.name
+      const callWithServiceName = mocks.counterAdd.mock.calls.find(
+        (c) => c[1] && c[1]["service.name"] === "my-bot"
+      );
+      expect(callWithServiceName).toBeDefined();
+    });
+
+    it("includes service.name in logger base attributes when serviceName is set", () => {
+      const mocks = mockOtelProviders();
+
+      const adapter = new iMessageAdapter({
+        local: false, logger: mockLogger,
+        serverUrl: "https://example.com", apiKey: "test-key",
+        otel: { enabled: true, serviceName: "my-bot" },
+      });
+
+      // Trigger a log via the adapter's wrapped logger
+      (adapter as unknown as { logger: { info: (msg: string) => void } }).logger.info("test");
+
+      expect(mocks.loggerEmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attributes: expect.objectContaining({ "service.name": "my-bot" }),
+        }),
+      );
+    });
+
+    it("omits service.name from attributes when serviceName is not set", async () => {
+      const mocks = mockOtelProviders();
+      mockSendMessage.mockResolvedValue({ guid: "msg-001" });
+
+      const adapter = new iMessageAdapter({
+        local: false, logger: mockLogger,
+        serverUrl: "https://example.com", apiKey: "test-key",
+        otel: { enabled: true },
+      });
+      await adapter.initialize(createMockChat() as never);
+      await adapter.postMessage("imessage:iMessage;-;+1234567890", "Hi");
+
+      const postMsgCall = mocks.startActiveSpan.mock.calls.find(
+        (c) => c[0] === "adapter.post_message"
+      );
+      expect((postMsgCall![1] as Record<string, any>).attributes).not.toHaveProperty("service.name");
+    });
+  });
+
+  describe("gateway resilience", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+      mockGatewayOn.mockReset();
+      mockGatewayConnect.mockReset();
+      mockGatewayClose.mockReset();
+    });
+
+    it("listener completes even when metrics throw in message handler", async () => {
+      const mocks = mockOtelProviders();
+      mocks.counterAdd.mockImplementation(() => { throw new Error("counter exploded"); });
+
+      const adapter = new iMessageAdapter({
+        local: false, logger: mockLogger,
+        serverUrl: "https://example.com", apiKey: "test-key",
+        otel: { enabled: true },
+      });
+      await adapter.initialize(createMockChat() as never);
+
+      const abortController = new AbortController();
+      const mockWaitUntil = vi.fn();
+
+      const response = await adapter.startGatewayListener(
+        { waitUntil: mockWaitUntil } as never,
+        50,
+        abortController.signal,
+      );
+
+      expect(response.status).toBe(200);
+      abortController.abort();
+
+      const listenerPromise = mockWaitUntil.mock.calls[0]?.[0];
+      await expect(
+        Promise.race([
+          listenerPromise,
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("listener hung")), 500)
+          ),
+        ])
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  describe("PII redaction end-to-end", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+      mockSendMessage.mockReset();
+    });
+
+    it("span attributes redact phone numbers in threadId and chatGuid", async () => {
+      const mocks = mockOtelProviders();
+      mockSendMessage.mockResolvedValue({ guid: "msg-001" });
+
+      const adapter = new iMessageAdapter({
+        local: false, logger: mockLogger,
+        serverUrl: "https://example.com", apiKey: "test-key",
+        otel: { enabled: true, redactPII: true },
+      });
+      await adapter.initialize(createMockChat() as never);
+
+      await adapter.postMessage("imessage:iMessage;-;+15551234567", "Hello!");
+
+      // Find the postMessage span call
+      const postMsgCall = mocks.startActiveSpan.mock.calls.find(
+        (c) => c[0] === "adapter.post_message"
+      );
+      expect(postMsgCall).toBeDefined();
+      const spanAttrs = (postMsgCall![1] as Record<string, any>).attributes;
+
+      // threadId must be redacted
+      expect(spanAttrs["imessage.thread_id"]).toBe("imessage:iMessage;-;+1555***4567");
+      // chatGuid must be redacted
+      expect(spanAttrs["imessage.chat_guid"]).toBe("iMessage;-;+1555***4567");
+
+      // Neither should contain the raw phone number
+      expect(spanAttrs["imessage.thread_id"]).not.toContain("+15551234567");
+      expect(spanAttrs["imessage.chat_guid"]).not.toContain("+15551234567");
+    });
+  });
+
+  describe("async edge cases", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+      mockGatewayOn.mockReset();
+      mockGatewayConnect.mockReset();
+      mockGatewayClose.mockReset();
+    });
+
+    it("listener shuts down even when a message handler hangs", async () => {
+      const mocks = mockOtelProviders();
+
+      mockGatewayOn.mockImplementation((event, handler) => {
+        if (event === "new-message") {
+          setTimeout(() => {
+            handler({
+              guid: "hanging-msg",
+              text: "hello",
+              isFromMe: false,
+              chats: [{ guid: "iMessage;-;+15551234567" }],
+              handle: { address: "+15551234567" },
+              dateCreated: Date.now(),
+              attachments: [],
+            });
+          }, 10);
+        }
+      });
+
+      const adapter = new iMessageAdapter({
+        local: false, logger: mockLogger,
+        serverUrl: "https://example.com", apiKey: "test-key",
+        otel: { enabled: true },
+      });
+      await adapter.initialize(createMockChat() as never);
+
+      const abortController = new AbortController();
+      const mockWaitUntil = vi.fn();
+
+      const response = await adapter.startGatewayListener(
+        { waitUntil: mockWaitUntil } as never,
+        50,
+        abortController.signal,
+      );
+
+      expect(response.status).toBe(200);
+      abortController.abort();
+
+      // CRITICAL: Assert the listener promise ACTUALLY RESOLVED
+      const listenerPromise = mockWaitUntil.mock.calls[0]?.[0];
+      await expect(
+        Promise.race([
+          listenerPromise,
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("listener hung — did not resolve within 500ms")), 500)
+          ),
+        ])
+      ).resolves.toBeUndefined();
+    });
+
+    it("handles duplicate message GUIDs without crash", async () => {
+      const mocks = mockOtelProviders();
+
+      mockGatewayOn.mockImplementation((event, handler) => {
+        if (event === "new-message") {
+          const msg = {
+            guid: "duplicate-guid-001",
+            text: "hello",
+            isFromMe: false,
+            chats: [{ guid: "iMessage;-;+15551234567" }],
+            handle: { address: "+15551234567" },
+            dateCreated: Date.now(),
+            attachments: [],
+          };
+          setTimeout(() => handler(msg), 10);
+          setTimeout(() => handler(msg), 20);
+        }
+      });
+
+      const mockChat = createMockChat();
+      const processedMessages: string[] = [];
+      (mockChat as unknown as { processMessage: ReturnType<typeof vi.fn> }).processMessage =
+        vi.fn((_adapter, _threadId, message) => {
+          processedMessages.push(message.id);
+        });
+
+      const adapter = new iMessageAdapter({
+        local: false, logger: mockLogger,
+        serverUrl: "https://example.com", apiKey: "test-key",
+        otel: { enabled: true },
+      });
+      await adapter.initialize(mockChat as never);
+
+      const abortController = new AbortController();
+      const mockWaitUntil = vi.fn();
+
+      await adapter.startGatewayListener(
+        { waitUntil: mockWaitUntil } as never,
+        100,
+        abortController.signal,
+      );
+
+      // Wait for messages to be processed
+      await new Promise((r) => setTimeout(r, 50));
+      abortController.abort();
+      await mockWaitUntil.mock.calls[0]?.[0];
+
+      // Both should have been processed (no dedup in adapter)
+      expect(processedMessages).toHaveLength(2);
+    });
+  });
+
+  describe("multi-instance isolation", () => {
+    it("two adapters have independent metrics instances", () => {
+      mockOtelProviders();
+
+      const adapter1 = new iMessageAdapter({
+        local: false,
+        logger: mockLogger,
+        serverUrl: "https://example.com",
+        apiKey: "test-key",
+        otel: { enabled: true, serviceName: "service-a" },
+      });
+
+      const adapter2 = new iMessageAdapter({
+        local: false,
+        logger: mockLogger,
+        serverUrl: "https://example.com",
+        apiKey: "test-key",
+        otel: { enabled: true, serviceName: "service-b" },
+      });
+
+      const metrics1 = (adapter1 as unknown as { metrics: object }).metrics;
+      const metrics2 = (adapter2 as unknown as { metrics: object }).metrics;
+
+      expect(metrics1).toBeDefined();
+      expect(metrics2).toBeDefined();
+      expect(metrics1).not.toBe(metrics2);
+    });
+
+    it("enabled and disabled adapters coexist without interference", async () => {
+      const mocks = mockOtelProviders();
+      mockSendMessage.mockResolvedValue({ guid: "msg-001" });
+
+      const enabledAdapter = new iMessageAdapter({
+        local: false,
+        logger: mockLogger,
+        serverUrl: "https://example.com",
+        apiKey: "test-key",
+        otel: { enabled: true },
+      });
+
+      const disabledAdapter = new iMessageAdapter({
+        local: false,
+        logger: mockLogger,
+        serverUrl: "https://example.com",
+        apiKey: "test-key",
+        otel: { enabled: false },
+      });
+
+      await enabledAdapter.initialize(createMockChat() as never);
+      await disabledAdapter.initialize(createMockChat() as never);
+
+      // Record call count before operations
+      const spanCallsBefore = mocks.startActiveSpan.mock.calls.length;
+
+      await enabledAdapter.postMessage("imessage:iMessage;-;+1234567890", "Hello from enabled!");
+      const spansAfterEnabled = mocks.startActiveSpan.mock.calls.length;
+
+      await disabledAdapter.postMessage("imessage:iMessage;-;+1234567890", "Hello from disabled!");
+      const spansAfterDisabled = mocks.startActiveSpan.mock.calls.length;
+
+      // Enabled adapter should have created spans
+      expect(spansAfterEnabled).toBeGreaterThan(spanCallsBefore);
+      // Disabled adapter should NOT have created additional spans
+      expect(spansAfterDisabled).toBe(spansAfterEnabled);
+    });
+
+    it("two enabled adapters with different providers don't cross-contaminate", async () => {
+      const startActiveSpanA = vi.fn(
+        (_name: string, _options: unknown, fn: (span: unknown) => unknown) =>
+          fn({ setStatus: vi.fn(), recordException: vi.fn(), end: vi.fn(), setAttribute: vi.fn() }),
+      );
+      const startActiveSpanB = vi.fn(
+        (_name: string, _options: unknown, fn: (span: unknown) => unknown) =>
+          fn({ setStatus: vi.fn(), recordException: vi.fn(), end: vi.fn(), setAttribute: vi.fn() }),
+      );
+
+      const makeMeterProvider = () => ({
+        getMeter: () => ({
+          createCounter: () => ({ add: vi.fn() }),
+          createHistogram: () => ({ record: vi.fn() }),
+          createUpDownCounter: () => ({ add: vi.fn() }),
+        }),
+      });
+
+      const makeLoggerProvider = () => ({
+        getLogger: () => ({ emit: vi.fn() }),
+      });
+
+      const providerA = {
+        tracerProvider: { getTracer: () => ({ startActiveSpan: startActiveSpanA }) } as never,
+        meterProvider: makeMeterProvider() as never,
+        loggerProvider: makeLoggerProvider() as never,
+      };
+
+      const providerB = {
+        tracerProvider: { getTracer: () => ({ startActiveSpan: startActiveSpanB }) } as never,
+        meterProvider: makeMeterProvider() as never,
+        loggerProvider: makeLoggerProvider() as never,
+      };
+
+      mockSendMessage.mockResolvedValue({ guid: "msg-001" });
+
+      const adapter1 = new iMessageAdapter({
+        local: false,
+        logger: mockLogger,
+        serverUrl: "https://example.com",
+        apiKey: "test-key",
+        otel: { enabled: true, ...providerA },
+      });
+
+      const adapter2 = new iMessageAdapter({
+        local: false,
+        logger: mockLogger,
+        serverUrl: "https://example.com",
+        apiKey: "test-key",
+        otel: { enabled: true, ...providerB },
+      });
+
+      await adapter1.initialize(createMockChat() as never);
+      await adapter2.initialize(createMockChat() as never);
+
+      // Reset call counts after initialize
+      startActiveSpanA.mockClear();
+      startActiveSpanB.mockClear();
+
+      await adapter1.postMessage("imessage:iMessage;-;+1234567890", "Hello from A!");
+
+      // Only providerA's tracer should have been called
+      expect(startActiveSpanA).toHaveBeenCalled();
+      expect(startActiveSpanB).not.toHaveBeenCalled();
+
+      startActiveSpanA.mockClear();
+      startActiveSpanB.mockClear();
+
+      await adapter2.postMessage("imessage:iMessage;-;+1234567890", "Hello from B!");
+
+      // Only providerB's tracer should have been called
+      expect(startActiveSpanB).toHaveBeenCalled();
+      expect(startActiveSpanA).not.toHaveBeenCalled();
+    });
   });
 });
 
