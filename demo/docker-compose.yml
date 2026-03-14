@@ -1,0 +1,25 @@
+# SigNoz + OTel Collector demo stack for chat-adapter-imessage telemetry
+#
+# Usage:
+#   cd demo && ./setup.sh    # clone SigNoz deploy files + start stack
+#   node --import ./register.js ../dist/demo-app.js   # run demo app
+#
+# SigNoz UI: http://localhost:8080
+# OTLP gRPC: localhost:4317
+# OTLP HTTP: localhost:4318
+
+services:
+  # ---------- SigNoz stack (pulled from official deploy files) ----------
+  # This compose file extends the SigNoz deploy. See setup.sh for details.
+
+  # --- Standalone OTel Collector for quick testing without full SigNoz ---
+  # Use this if you just want to see traces/metrics/logs in console output.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    command: ["--config", "/etc/otel-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    restart: unless-stopped
