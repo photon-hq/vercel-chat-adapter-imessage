@@ -29,6 +29,49 @@ import type {
 } from "chat";
 import { ConsoleLogger, Message, NotImplementedError, parseMarkdown } from "chat";
 import { iMessageFormatConverter } from "./markdown";
+import {
+  metrics,
+  trace,
+  type MeterProvider,
+  type Tracer,
+  type TracerProvider,
+} from "@opentelemetry/api";
+import { logs, type LoggerProvider } from "@opentelemetry/api-logs";
+import { DEFAULT_OTEL_CONFIG, type iMessageOTelConfig } from "./telemetry/config";
+import {
+  ATTR_ERROR_TYPE,
+  ATTR_GATEWAY_ABORTED,
+  ATTR_GATEWAY_DURATION_MS,
+  ATTR_GATEWAY_ERRORS,
+  ATTR_GATEWAY_MESSAGES_RECEIVED,
+  ATTR_SERVICE_NAME,
+  ATTR_IMESSAGE_ATTACHMENT_COUNT,
+  ATTR_IMESSAGE_MESSAGE_ID,
+  SPAN_ADD_REACTION,
+  SPAN_DELETE_MESSAGE,
+  SPAN_EDIT_MESSAGE,
+  SPAN_FETCH_MESSAGES,
+  SPAN_FETCH_THREAD,
+  SPAN_FILES_CLEANUP,
+  SPAN_FILES_WRITE_TEMP,
+  SPAN_GATEWAY_LISTENER,
+  SPAN_GATEWAY_RUNNER,
+  SPAN_INITIALIZE,
+  SPAN_MESSAGE_RECEIVE,
+  SPAN_OPEN_MODAL,
+  SPAN_POLL_VOTE_RECEIVE,
+  SPAN_POST_MESSAGE,
+  SPAN_REMOVE_REACTION,
+  SPAN_SDK_CONNECT,
+  SPAN_SDK_DISCONNECT,
+  SPAN_SDK_SEND_ATTACHMENT,
+  SPAN_SDK_SEND_MESSAGE,
+  SPAN_START_TYPING,
+  buildCommonAttributes,
+} from "./telemetry/attributes";
+import { OTelLogger } from "./telemetry/logger";
+import { AdapterMetrics, NOOP_METRICS, createMeter } from "./telemetry/metrics";
+import { createTracer, withSpan } from "./telemetry/tracer";
 import type { iMessageGatewayMessageData, iMessageThreadId } from "./types";
 
 export { iMessageFormatConverter } from "./markdown";
@@ -37,11 +80,13 @@ export type {
   iMessageThreadId,
   NativeWebhookPayload,
 } from "./types";
+export type { iMessageOTelConfig } from "./telemetry/config";
 
 export interface iMessageAdapterLocalConfig {
   apiKey?: string;
   local: true;
   logger: Logger;
+  otel?: iMessageOTelConfig;
   serverUrl?: string;
 }
 
@@ -49,6 +94,7 @@ export interface iMessageAdapterRemoteConfig {
   apiKey: string;
   local: false;
   logger: Logger;
+  otel?: iMessageOTelConfig;
   serverUrl: string;
 }
 
@@ -66,6 +112,12 @@ export class iMessageAdapter implements Adapter {
 
   private chat: ChatInstance | null = null;
   private readonly logger: Logger;
+  private readonly tracer: Tracer | null;
+  private readonly metrics: AdapterMetrics;
+  private readonly otelConfig: iMessageOTelConfig;
+  private readonly tracerProvider?: TracerProvider;
+  private readonly meterProvider?: MeterProvider;
+  private readonly loggerProvider?: LoggerProvider;
   private readonly formatConverter = new iMessageFormatConverter();
   private readonly modalPollMap = new Map<
     string,
@@ -90,7 +142,28 @@ export class iMessageAdapter implements Adapter {
     this.local = config.local;
     this.serverUrl = config.serverUrl;
     this.apiKey = config.apiKey;
-    this.logger = config.logger;
+    this.otelConfig = { ...DEFAULT_OTEL_CONFIG, ...config.otel };
+
+    if (this.otelConfig.enabled) {
+      this.tracerProvider =
+        this.otelConfig.tracerProvider ?? trace.getTracerProvider();
+      this.meterProvider =
+        this.otelConfig.meterProvider ?? metrics.getMeterProvider();
+      this.loggerProvider =
+        this.otelConfig.loggerProvider ?? logs.getLoggerProvider();
+      this.tracer = createTracer(this.tracerProvider);
+      this.metrics = new AdapterMetrics(createMeter(this.meterProvider));
+      this.logger = new OTelLogger(
+        config.logger,
+        this.loggerProvider,
+        undefined,
+        this.telemetryBaseAttributes(),
+      );
+    } else {
+      this.tracer = null;
+      this.metrics = NOOP_METRICS;
+      this.logger = config.logger;
+    }
 
     if (config.local) {
       this.sdk = new IMessageSDK();
@@ -103,17 +176,21 @@ export class iMessageAdapter implements Adapter {
   }
 
   async initialize(chat: ChatInstance): Promise<void> {
-    this.chat = chat;
-    this.logger.info("iMessage adapter initialized", {
-      local: this.local,
-      serverUrl: this.serverUrl ? "configured" : "not configured",
-    });
+    return withSpan(this.tracer, SPAN_INITIALIZE, this.attrs(), async (span) => {
+      this.chat = chat;
+      this.logger.info("iMessage adapter initialized", {
+        local: this.local,
+        serverUrl: this.serverUrl ? "configured" : "not configured",
+      });
 
-    if (!this.local) {
-      const sdk = this.sdk as AdvancedIMessageKit;
-      await sdk.connect();
-      await new Promise<void>((resolve) => sdk.once("ready", resolve));
-    }
+      if (!this.local) {
+        const sdk = this.sdk as AdvancedIMessageKit;
+        await withSpan(this.tracer, SPAN_SDK_CONNECT, this.attrs(), async () => {
+          await sdk.connect();
+          await new Promise<void>((resolve) => sdk.once("ready", resolve));
+        });
+      }
+    });
   }
 
   async handleWebhook(
@@ -130,57 +207,101 @@ export class iMessageAdapter implements Adapter {
     message: AdapterPostableMessage
   ): Promise<RawMessage> {
     const { chatGuid } = this.decodeThreadId(threadId);
-
-    const text = this.formatConverter.renderPostable(message);
     const files = extractFiles(message);
-    const tempFiles =
-      files.length > 0 ? await this.writeTempFiles(files) : null;
 
-    try {
-      if (this.local) {
-        const sdk = this.sdk as IMessageSDK;
-        const recipient = chatGuid.split(";").pop() ?? chatGuid;
-        const content = tempFiles?.paths.length
-          ? { text: text || undefined, files: tempFiles.paths }
-          : text;
-        const result = await sdk.send(recipient, content);
-        return {
-          id: result.message?.guid ?? `local-${Date.now()}`,
-          threadId,
-          raw: result,
-        };
-      }
+    const modeAttr = { mode: this.local ? "local" : "remote" };
+    const sendStart = Date.now();
 
-      const sdk = this.sdk as AdvancedIMessageKit;
-      let result: MessageResponse | undefined;
+    return withSpan(
+      this.tracer,
+      SPAN_POST_MESSAGE,
+      this.attrs({ threadId, chatGuid, attachmentCount: files.length }),
+      async (span) => {
+        const text = this.formatConverter.renderPostable(message);
+        const tempFiles =
+          files.length > 0
+            ? await withSpan(this.tracer, SPAN_FILES_WRITE_TEMP, {
+                [ATTR_IMESSAGE_ATTACHMENT_COUNT]: files.length,
+              }, () => this.writeTempFiles(files))
+            : null;
 
-      if (text || !tempFiles) {
-        result = await sdk.messages.sendMessage({
-          chatGuid,
-          message: text,
-        });
-      }
+        try {
+          if (this.local) {
+            const sdk = this.sdk as IMessageSDK;
+            const recipient = chatGuid.split(";").pop() ?? chatGuid;
+            const content = tempFiles?.paths.length
+              ? { text: text || undefined, files: tempFiles.paths }
+              : text;
+            const result = await withSpan(
+              this.tracer, SPAN_SDK_SEND_MESSAGE, this.attrs({ chatGuid }),
+              () => sdk.send(recipient, content),
+            );
+            this.safeMetric(() => this.metrics.messagesSent.add(1, this.metricAttrs(modeAttr)));
+            this.safeMetric(() => this.metrics.messageSendDuration.record(
+              Date.now() - sendStart,
+              this.metricAttrs(modeAttr),
+            ));
+            return {
+              id: result.message?.guid ?? `local-${Date.now()}`,
+              threadId,
+              raw: result,
+            };
+          }
 
-      if (tempFiles) {
-        for (const filePath of tempFiles.paths) {
-          const attachmentResult = await sdk.attachments.sendAttachment({
-            chatGuid,
-            filePath,
-          });
-          result ??= attachmentResult;
+          const sdk = this.sdk as AdvancedIMessageKit;
+          let result: MessageResponse | undefined;
+
+          if (text || !tempFiles) {
+            result = await withSpan(
+              this.tracer, SPAN_SDK_SEND_MESSAGE, this.attrs({ chatGuid }),
+              () => sdk.messages.sendMessage({ chatGuid, message: text }),
+            );
+          }
+
+          if (tempFiles) {
+            for (const filePath of tempFiles.paths) {
+              const uploadStart = Date.now();
+              const attachmentResult = await withSpan(
+                this.tracer, SPAN_SDK_SEND_ATTACHMENT, this.attrs({ chatGuid }),
+                () => sdk.attachments.sendAttachment({ chatGuid, filePath }),
+              );
+              this.safeMetric(() => this.metrics.attachmentsSent.add(1, this.metricAttrs(modeAttr)));
+              this.safeMetric(() => this.metrics.attachmentUploadDuration.record(
+                Date.now() - uploadStart,
+                this.metricAttrs(modeAttr),
+              ));
+              result ??= attachmentResult;
+            }
+          }
+
+          this.safeMetric(() => this.metrics.messagesSent.add(1, this.metricAttrs(modeAttr)));
+          this.safeMetric(() => this.metrics.messageSendDuration.record(
+            Date.now() - sendStart,
+            this.metricAttrs(modeAttr),
+          ));
+          return {
+            id: result?.guid ?? `msg-${Date.now()}`,
+            threadId,
+            raw: result,
+          };
+        } catch (error) {
+          this.safeMetric(() => this.metrics.messageSendErrors.add(
+            1,
+            this.metricAttrs({
+              ...modeAttr,
+              [ATTR_ERROR_TYPE]: error instanceof Error ? error.constructor.name : "Unknown",
+            }),
+          ));
+          throw error;
+        } finally {
+          if (tempFiles) {
+            await withSpan(this.tracer, SPAN_FILES_CLEANUP, {}, () =>
+              rm(tempFiles.dir, { recursive: true }).catch(() => {}),
+            );
+          }
         }
-      }
-
-      return {
-        id: result?.guid ?? `msg-${Date.now()}`,
-        threadId,
-        raw: result,
-      };
-    } finally {
-      if (tempFiles) {
-        await rm(tempFiles.dir, { recursive: true }).catch(() => {});
-      }
-    }
+      },
+    );
   }
 
   async editMessage(
@@ -188,32 +309,41 @@ export class iMessageAdapter implements Adapter {
     messageId: string,
     message: AdapterPostableMessage
   ): Promise<RawMessage> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "editMessage is not supported in local mode",
-        "editMessage"
-      );
-    }
+    return withSpan(
+      this.tracer,
+      SPAN_EDIT_MESSAGE,
+      this.attrs({ threadId, messageId }),
+      async () => {
+        if (this.local) {
+          throw new NotImplementedError(
+            "editMessage is not supported in local mode",
+            "editMessage"
+          );
+        }
 
-    const text = this.formatConverter.renderPostable(message);
-    const sdk = this.sdk as AdvancedIMessageKit;
-    const result = await sdk.messages.editMessage({
-      messageGuid: messageId,
-      editedMessage: text,
-      backwardsCompatibilityMessage: text,
-    });
-    return {
-      id: result.guid,
-      threadId,
-      raw: result,
-    };
+        const text = this.formatConverter.renderPostable(message);
+        const sdk = this.sdk as AdvancedIMessageKit;
+        const result = await sdk.messages.editMessage({
+          messageGuid: messageId,
+          editedMessage: text,
+          backwardsCompatibilityMessage: text,
+        });
+        return {
+          id: result.guid,
+          threadId,
+          raw: result,
+        };
+      },
+    );
   }
 
   async deleteMessage(_threadId: string, _messageId: string): Promise<void> {
-    throw new NotImplementedError(
-      "deleteMessage is not implemented",
-      "deleteMessage"
-    );
+    return withSpan(this.tracer, SPAN_DELETE_MESSAGE, this.attrs(), async () => {
+      throw new NotImplementedError(
+        "deleteMessage is not implemented",
+        "deleteMessage"
+      );
+    });
   }
 
   parseMessage(raw: unknown): Message {
@@ -228,43 +358,63 @@ export class iMessageAdapter implements Adapter {
     options?: FetchOptions
   ): Promise<FetchResult> {
     const { chatGuid } = this.decodeThreadId(threadId);
-    const direction = options?.direction ?? "backward";
-    const limit = options?.limit ?? 50;
-    const cursor = options?.cursor;
 
-    if (this.local) {
-      return this.fetchMessagesLocal(chatGuid, direction, limit, cursor);
-    }
+    const fetchStart = Date.now();
+    return withSpan(
+      this.tracer,
+      SPAN_FETCH_MESSAGES,
+      this.attrs({ threadId, chatGuid }),
+      async () => {
+        const direction = options?.direction ?? "backward";
+        const limit = options?.limit ?? 50;
+        const cursor = options?.cursor;
 
-    return this.fetchMessagesRemote(chatGuid, direction, limit, cursor);
+        const result = this.local
+          ? await this.fetchMessagesLocal(chatGuid, direction, limit, cursor)
+          : await this.fetchMessagesRemote(chatGuid, direction, limit, cursor);
+
+        this.safeMetric(() => this.metrics.fetchDuration.record(
+          Date.now() - fetchStart,
+          this.metricAttrs(),
+        ));
+        return result;
+      },
+    );
   }
 
   async fetchThread(threadId: string): Promise<ThreadInfo> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "fetchThread is not supported in local mode",
-        "fetchThread"
-      );
-    }
+    return withSpan(
+      this.tracer,
+      SPAN_FETCH_THREAD,
+      this.attrs({ threadId }),
+      async () => {
+        if (this.local) {
+          throw new NotImplementedError(
+            "fetchThread is not supported in local mode",
+            "fetchThread"
+          );
+        }
 
-    const { chatGuid } = this.decodeThreadId(threadId);
-    const sdk = this.sdk as AdvancedIMessageKit;
-    const chat = await sdk.chats.getChat(chatGuid);
-    const isDM = chatGuid.includes(";-;");
+        const { chatGuid } = this.decodeThreadId(threadId);
+        const sdk = this.sdk as AdvancedIMessageKit;
+        const chat = await sdk.chats.getChat(chatGuid);
+        const isDM = chatGuid.includes(";-;");
 
-    return {
-      id: threadId,
-      channelId: chatGuid,
-      channelName: chat.displayName || undefined,
-      isDM,
-      metadata: {
-        chatIdentifier: chat.chatIdentifier,
-        style: chat.style,
-        participants: chat.participants,
-        isArchived: chat.isArchived,
-        raw: chat,
+        return {
+          id: threadId,
+          channelId: chatGuid,
+          channelName: chat.displayName || undefined,
+          isDM,
+          metadata: {
+            chatIdentifier: chat.chatIdentifier,
+            style: chat.style,
+            participants: chat.participants,
+            isArchived: chat.isArchived,
+            raw: chat,
+          },
+        };
       },
-    };
+    );
   }
 
   async addReaction(
@@ -272,21 +422,32 @@ export class iMessageAdapter implements Adapter {
     messageId: string,
     emoji: EmojiValue | string
   ): Promise<void> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "addReaction is not supported in local mode",
-        "addReaction"
-      );
-    }
+    return withSpan(
+      this.tracer,
+      SPAN_ADD_REACTION,
+      this.attrs({ threadId, messageId }),
+      async () => {
+        if (this.local) {
+          throw new NotImplementedError(
+            "addReaction is not supported in local mode",
+            "addReaction"
+          );
+        }
 
-    const tapback = this.emojiToTapback(emoji);
-    const { chatGuid } = this.decodeThreadId(threadId);
-    const sdk = this.sdk as AdvancedIMessageKit;
-    await sdk.messages.sendReaction({
-      chatGuid,
-      messageGuid: messageId,
-      reaction: tapback,
-    });
+        const tapback = this.emojiToTapback(emoji);
+        const { chatGuid } = this.decodeThreadId(threadId);
+        const sdk = this.sdk as AdvancedIMessageKit;
+        await sdk.messages.sendReaction({
+          chatGuid,
+          messageGuid: messageId,
+          reaction: tapback,
+        });
+        this.safeMetric(() => this.metrics.reactionsSent.add(
+          1,
+          this.metricAttrs({ tapback_type: tapback }),
+        ));
+      },
+    );
   }
 
   async removeReaction(
@@ -294,35 +455,49 @@ export class iMessageAdapter implements Adapter {
     messageId: string,
     emoji: EmojiValue | string
   ): Promise<void> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "removeReaction is not supported in local mode",
-        "removeReaction"
-      );
-    }
+    return withSpan(
+      this.tracer,
+      SPAN_REMOVE_REACTION,
+      this.attrs({ threadId, messageId }),
+      async () => {
+        if (this.local) {
+          throw new NotImplementedError(
+            "removeReaction is not supported in local mode",
+            "removeReaction"
+          );
+        }
 
-    const tapback = this.emojiToTapback(emoji);
-    const { chatGuid } = this.decodeThreadId(threadId);
-    const sdk = this.sdk as AdvancedIMessageKit;
-    await sdk.messages.sendReaction({
-      chatGuid,
-      messageGuid: messageId,
-      reaction: `-${tapback}`,
-    });
+        const tapback = this.emojiToTapback(emoji);
+        const { chatGuid } = this.decodeThreadId(threadId);
+        const sdk = this.sdk as AdvancedIMessageKit;
+        await sdk.messages.sendReaction({
+          chatGuid,
+          messageGuid: messageId,
+          reaction: `-${tapback}`,
+        });
+      },
+    );
   }
 
   async startTyping(threadId: string, _status?: string): Promise<void> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "startTyping is not supported in local mode",
-        "startTyping"
-      );
-    }
+    return withSpan(
+      this.tracer,
+      SPAN_START_TYPING,
+      this.attrs({ threadId }),
+      async () => {
+        if (this.local) {
+          throw new NotImplementedError(
+            "startTyping is not supported in local mode",
+            "startTyping"
+          );
+        }
 
-    const { chatGuid } = this.decodeThreadId(threadId);
-    const sdk = this.sdk as AdvancedIMessageKit;
-    await sdk.chats.startTyping(chatGuid);
-    setTimeout(() => sdk.chats.stopTyping(chatGuid), 3000);
+        const { chatGuid } = this.decodeThreadId(threadId);
+        const sdk = this.sdk as AdvancedIMessageKit;
+        await sdk.chats.startTyping(chatGuid);
+        setTimeout(() => sdk.chats.stopTyping(chatGuid), 3000);
+      },
+    );
   }
 
   async openModal(
@@ -330,41 +505,49 @@ export class iMessageAdapter implements Adapter {
     modal: ModalElement,
     contextId?: string
   ): Promise<{ viewId: string }> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "openModal is not supported in local mode",
-        "openModal"
-      );
-    }
+    return withSpan(
+      this.tracer,
+      SPAN_OPEN_MODAL,
+      this.attrs({ threadId: triggerId }),
+      async () => {
+        if (this.local) {
+          throw new NotImplementedError(
+            "openModal is not supported in local mode",
+            "openModal"
+          );
+        }
 
-    const select = modal.children.find(
-      (c): c is SelectElement => c.type === "select"
+        const select = modal.children.find(
+          (c): c is SelectElement => c.type === "select"
+        );
+        if (!select) {
+          throw new ValidationError(
+            "imessage",
+            "openModal requires at least one Select child — iMessage modals map to native polls"
+          );
+        }
+
+        const { chatGuid } = this.decodeThreadId(triggerId);
+        const sdk = this.sdk as AdvancedIMessageKit;
+
+        const result = await sdk.polls.create({
+          chatGuid,
+          title: modal.title,
+          options: select.options.map((o) => o.label),
+        });
+
+        this.modalPollMap.set(result.guid, {
+          callbackId: modal.callbackId,
+          selectId: select.id,
+          options: select.options,
+          contextId,
+          privateMetadata: modal.privateMetadata,
+        });
+
+        this.safeMetric(() => this.metrics.pollsCreated.add(1, this.metricAttrs()));
+        return { viewId: result.guid };
+      },
     );
-    if (!select) {
-      throw new ValidationError(
-        "imessage",
-        "openModal requires at least one Select child — iMessage modals map to native polls"
-      );
-    }
-
-    const { chatGuid } = this.decodeThreadId(triggerId);
-    const sdk = this.sdk as AdvancedIMessageKit;
-
-    const result = await sdk.polls.create({
-      chatGuid,
-      title: modal.title,
-      options: select.options.map((o) => o.label),
-    });
-
-    this.modalPollMap.set(result.guid, {
-      callbackId: modal.callbackId,
-      selectId: select.id,
-      options: select.options,
-      contextId,
-      privateMetadata: modal.privateMetadata,
-    });
-
-    return { viewId: result.guid };
   }
 
   renderFormatted(content: FormattedContent): string {
@@ -395,33 +578,58 @@ export class iMessageAdapter implements Adapter {
     durationMs = 180000,
     abortSignal?: AbortSignal
   ): Promise<Response> {
-    if (!this.chat) {
-      return new Response("Chat instance not initialized", { status: 500 });
-    }
-
-    if (!options.waitUntil) {
-      return new Response("waitUntil not provided", { status: 500 });
-    }
-
-    this.logger.info("Starting iMessage Gateway listener", {
-      durationMs,
-      mode: this.local ? "local" : "remote",
-    });
-
-    const listenerPromise = this.runGatewayListener(durationMs, abortSignal, options);
-    options.waitUntil(listenerPromise);
-
-    return new Response(
-      JSON.stringify({
-        status: "listening",
-        durationMs,
-        mode: this.local ? "local" : "remote",
-        message: `Gateway listener started, will run for ${durationMs / 1000} seconds`,
-      }),
+    return withSpan(
+      this.tracer,
+      SPAN_GATEWAY_LISTENER,
       {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }
+        ...this.attrs(),
+        [ATTR_GATEWAY_DURATION_MS]: durationMs,
+      },
+      async () => {
+        if (!this.chat) {
+          return new Response("Chat instance not initialized", { status: 500 });
+        }
+
+        if (!options.waitUntil) {
+          return new Response("waitUntil not provided", { status: 500 });
+        }
+
+        this.logger.info("Starting iMessage Gateway listener", {
+          durationMs,
+          mode: this.local ? "local" : "remote",
+        });
+
+        this.safeMetric(() => this.metrics.gatewaySessions.add(
+          1,
+          this.metricAttrs({ mode: this.local ? "local" : "remote" }),
+        ));
+        this.safeMetric(() => this.metrics.activeGatewayListeners.add(1, this.metricAttrs()));
+
+        const sessionStart = Date.now();
+        const listenerPromise = this.runGatewayListener(durationMs, abortSignal, options)
+          .finally(() => {
+            this.safeMetric(() => this.metrics.activeGatewayListeners.add(-1, this.metricAttrs()));
+            this.safeMetric(() => this.metrics.gatewaySessionDuration.record(
+              Date.now() - sessionStart,
+              this.metricAttrs(),
+            ));
+            return this.flushTelemetry();
+          });
+        options.waitUntil(listenerPromise);
+
+        return new Response(
+          JSON.stringify({
+            status: "listening",
+            durationMs,
+            mode: this.local ? "local" : "remote",
+            message: `Gateway listener started, will run for ${durationMs / 1000} seconds`,
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }
+        );
+      },
     );
   }
 
@@ -430,87 +638,169 @@ export class iMessageAdapter implements Adapter {
     abortSignal?: AbortSignal,
     options?: WebhookOptions
   ): Promise<void> {
-    let isShuttingDown = false;
-    let remoteGatewaySdk: AdvancedIMessageKit | null = null;
+    return withSpan(
+      this.tracer,
+      SPAN_GATEWAY_RUNNER,
+      {
+        ...this.attrs(),
+        [ATTR_GATEWAY_DURATION_MS]: durationMs,
+      },
+      async (runnerSpan) => {
+        let isShuttingDown = false;
+        let remoteGatewaySdk: AdvancedIMessageKit | null = null;
+        let messagesReceived = 0;
+        let errorsEncountered = 0;
 
-    try {
-      if (this.local) {
-        const sdk = this.sdk as IMessageSDK;
-        await sdk.startWatching({
-          onMessage: async (message: IMessageLocalMessage) => {
-            if (isShuttingDown) return;
-            if (message.isFromMe) return;
-            const data = this.normalizeLocalMessage(message);
-            this.handleGatewayMessage(data);
-          },
-          onError: (error: Error) => {
-            this.logger.error("iMessage local watcher error", {
-              error: String(error),
+        try {
+          if (this.local) {
+            const sdk = this.sdk as IMessageSDK;
+            await sdk.startWatching({
+              onMessage: async (message: IMessageLocalMessage) => {
+                if (isShuttingDown) return;
+                if (message.isFromMe) return;
+                messagesReceived++;
+                this.safeMetric(() => this.metrics.messagesReceived.add(
+                  1,
+                  this.metricAttrs({
+                    mode: "local",
+                    is_group: String(message.isGroupChat),
+                    source: "local",
+                  }),
+                ));
+                const data = this.normalizeLocalMessage(message);
+                this.handleGatewayMessage(data);
+              },
+              onError: (error: Error) => {
+                errorsEncountered++;
+                this.safeMetric(() => this.metrics.gatewayErrors.add(
+                  1,
+                  this.metricAttrs({ mode: "local" }),
+                ));
+                this.logger.error("iMessage local watcher error", {
+                  error: String(error),
+                });
+              },
             });
-          },
-        });
-      } else {
-        remoteGatewaySdk = new AdvancedIMessageKit({
-          serverUrl: this.serverUrl,
-          apiKey: this.apiKey,
-        });
-        await remoteGatewaySdk.connect();
+          } else {
+            remoteGatewaySdk = new AdvancedIMessageKit({
+              serverUrl: this.serverUrl,
+              apiKey: this.apiKey,
+            });
 
-        remoteGatewaySdk.on(
-          "new-message",
-          async (messageResponse: MessageResponse) => {
-            if (isShuttingDown) return;
-            if (messageResponse.isFromMe) return;
+            await withSpan(this.tracer, SPAN_SDK_CONNECT, this.attrs(), () =>
+              remoteGatewaySdk!.connect(),
+            );
 
-            if (isPollVote(messageResponse)) {
-              this.handlePollVoteAsModalSubmit(messageResponse, options);
-              return;
-            }
+            remoteGatewaySdk.on(
+              "new-message",
+              async (messageResponse: MessageResponse) => {
+                if (isShuttingDown) return;
+                if (messageResponse.isFromMe) return;
 
-            const data = this.normalizeRemoteMessage(messageResponse);
-            this.handleGatewayMessage(data);
+                if (isPollVote(messageResponse)) {
+                  withSpan(
+                    this.tracer,
+                    SPAN_POLL_VOTE_RECEIVE,
+                    this.attrs({ messageId: messageResponse.guid }),
+                    async () => {
+                      this.handlePollVoteAsModalSubmit(messageResponse, options);
+                    },
+                  ).catch((err) => {
+                    errorsEncountered++;
+                    this.safeMetric(() => this.metrics.gatewayErrors.add(
+                      1,
+                      this.metricAttrs({ mode: "remote" }),
+                    ));
+                    this.logger.error("Poll vote processing error", {
+                      error: String(err),
+                    });
+                  });
+                  return;
+                }
+
+                messagesReceived++;
+                const chatGuid = messageResponse.chats?.[0]?.guid ?? "";
+                this.safeMetric(() => this.metrics.messagesReceived.add(
+                  1,
+                  this.metricAttrs({
+                    mode: "remote",
+                    is_group: String(!chatGuid.includes(";-;")),
+                    source: "remote",
+                  }),
+                ));
+
+                withSpan(
+                  this.tracer,
+                  SPAN_MESSAGE_RECEIVE,
+                  this.attrs({
+                    messageId: messageResponse.guid,
+                    chatGuid,
+                  }),
+                  async () => {
+                    const data = this.normalizeRemoteMessage(messageResponse);
+                    this.handleGatewayMessage(data, options);
+                  },
+                ).catch((err) => {
+                  errorsEncountered++;
+                  this.safeMetric(() => this.metrics.gatewayErrors.add(
+                    1,
+                    this.metricAttrs({ mode: "remote" }),
+                  ));
+                  this.logger.error("Message processing error", {
+                    error: String(err),
+                  });
+                });
+              }
+            );
           }
-        );
-      }
 
-      await new Promise<void>((resolve) => {
-        const timeout = setTimeout(resolve, durationMs);
-        if (abortSignal) {
-          if (abortSignal.aborted) {
-            clearTimeout(timeout);
-            resolve();
-            return;
-          }
-          abortSignal.addEventListener(
-            "abort",
-            () => {
-              this.logger.info(
-                "iMessage Gateway listener received abort signal"
+          await new Promise<void>((resolve) => {
+            const timeout = setTimeout(resolve, durationMs);
+            if (abortSignal) {
+              if (abortSignal.aborted) {
+                clearTimeout(timeout);
+                resolve();
+                return;
+              }
+              abortSignal.addEventListener(
+                "abort",
+                () => {
+                  this.logger.info(
+                    "iMessage Gateway listener received abort signal"
+                  );
+                  clearTimeout(timeout);
+                  resolve();
+                },
+                { once: true }
               );
-              clearTimeout(timeout);
-              resolve();
-            },
-            { once: true }
-          );
-        }
-      });
+            }
+          });
 
-      this.logger.info(
-        "iMessage Gateway listener duration elapsed, disconnecting"
-      );
-    } catch (error) {
-      this.logger.error("iMessage Gateway listener error", {
-        error: String(error),
-      });
-    } finally {
-      isShuttingDown = true;
-      if (this.local) {
-        (this.sdk as IMessageSDK).stopWatching();
-      } else if (remoteGatewaySdk) {
-        await remoteGatewaySdk.close();
-      }
-      this.logger.info("iMessage Gateway listener stopped");
-    }
+          runnerSpan.setAttribute(ATTR_GATEWAY_ABORTED, !!abortSignal?.aborted);
+          this.logger.info(
+            "iMessage Gateway listener duration elapsed, disconnecting"
+          );
+        } catch (error) {
+          errorsEncountered++;
+          this.logger.error("iMessage Gateway listener error", {
+            error: String(error),
+          });
+        } finally {
+          runnerSpan.setAttribute(ATTR_GATEWAY_MESSAGES_RECEIVED, messagesReceived);
+          runnerSpan.setAttribute(ATTR_GATEWAY_ERRORS, errorsEncountered);
+
+          isShuttingDown = true;
+          if (this.local) {
+            (this.sdk as IMessageSDK).stopWatching();
+          } else if (remoteGatewaySdk) {
+            await withSpan(this.tracer, SPAN_SDK_DISCONNECT, this.attrs(), () =>
+              remoteGatewaySdk!.close(),
+            );
+          }
+          this.logger.info("iMessage Gateway listener stopped");
+        }
+      },
+    );
   }
 
   private handlePollVoteAsModalSubmit(
@@ -521,18 +811,30 @@ export class iMessageAdapter implements Adapter {
 
     const pollGuid = messageResponse.associatedMessageGuid;
     if (!pollGuid) {
+      this.safeMetric(() => this.metrics.pollVotesDropped.add(
+        1,
+        this.metricAttrs({ reason: "missing_guid" }),
+      ));
       this.logger.debug("Poll vote missing associatedMessageGuid, skipping");
       return;
     }
 
     const meta = this.modalPollMap.get(pollGuid);
     if (!meta) {
+      this.safeMetric(() => this.metrics.pollVotesDropped.add(
+        1,
+        this.metricAttrs({ reason: "unknown_poll" }),
+      ));
       this.logger.debug("Poll vote for unknown poll, skipping", { pollGuid });
       return;
     }
 
     const parsed = parsePollVotes(messageResponse);
     if (!parsed) {
+      this.safeMetric(() => this.metrics.pollVotesDropped.add(
+        1,
+        this.metricAttrs({ reason: "parse_failed" }),
+      ));
       this.logger.debug("Failed to parse poll votes", {
         guid: messageResponse.guid,
       });
@@ -546,6 +848,7 @@ export class iMessageAdapter implements Adapter {
         : meta.options[optionIndex];
       const value = option?.value ?? vote.voteOptionIdentifier;
 
+      this.safeMetric(() => this.metrics.pollVotesReceived.add(1, this.metricAttrs()));
       this.chat.processModalSubmit(
         {
           adapter: this,
@@ -797,6 +1100,65 @@ export class iMessageAdapter implements Adapter {
     return tapback;
   }
 
+  /** Safely record a metric — never let telemetry failures propagate. */
+  private safeMetric(fn: () => void): void {
+    try { fn(); } catch { /* telemetry failure — swallow */ }
+  }
+
+  private attrs(opts?: Parameters<typeof buildCommonAttributes>[1]) {
+    return buildCommonAttributes(this.local ? "local" : "remote", {
+      ...opts,
+      redactPII: this.otelConfig.redactPII,
+      serviceName: this.otelConfig.serviceName,
+    });
+  }
+
+  private telemetryBaseAttributes(): Record<string, string> {
+    if (!this.otelConfig.serviceName) {
+      return {};
+    }
+
+    return {
+      [ATTR_SERVICE_NAME]: this.otelConfig.serviceName,
+    };
+  }
+
+  private metricAttrs(
+    attrs?: Record<string, string | number | boolean>,
+  ): Record<string, string | number | boolean> | undefined {
+    if (!this.otelConfig.serviceName) {
+      return attrs;
+    }
+
+    return {
+      [ATTR_SERVICE_NAME]: this.otelConfig.serviceName,
+      ...attrs,
+    };
+  }
+
+  /**
+   * Attempt to flush OTel providers. Best-effort — providers from the API
+   * interface don't expose forceFlush, but SDK implementations do.
+   */
+  private async flushTelemetry(): Promise<void> {
+    const flush = async (provider: unknown) => {
+      if (
+        provider &&
+        typeof provider === "object" &&
+        "forceFlush" in provider &&
+        typeof (provider as { forceFlush: () => Promise<void> }).forceFlush === "function"
+      ) {
+        await (provider as { forceFlush: () => Promise<void> }).forceFlush();
+      }
+    };
+
+    await Promise.allSettled([
+      flush(this.tracerProvider),
+      flush(this.meterProvider),
+      flush(this.loggerProvider),
+    ]);
+  }
+
   private getAttachmentType(
     mimeType?: string
   ): "image" | "video" | "audio" | "file" {
@@ -818,6 +1180,7 @@ export function createiMessageAdapter(
     return new iMessageAdapter({
       local: true,
       logger,
+      otel: config?.otel,
       serverUrl: config?.serverUrl ?? process.env.IMESSAGE_SERVER_URL,
       apiKey: config?.apiKey ?? process.env.IMESSAGE_API_KEY,
     });
@@ -842,6 +1205,7 @@ export function createiMessageAdapter(
   return new iMessageAdapter({
     local: false,
     logger,
+    otel: config?.otel,
     serverUrl,
     apiKey,
   });
