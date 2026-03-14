@@ -149,6 +149,41 @@ This runs every 9 minutes, ensuring overlap with the 10-minute listener duration
 | `serverUrl` | Remote only | URL of the remote iMessage server. Auto-detected from `IMESSAGE_SERVER_URL` |
 | `apiKey` | Remote only | API key for remote server authentication. Auto-detected from `IMESSAGE_API_KEY` |
 | `logger` | No | Logger instance (defaults to `ConsoleLogger("info")`) |
+| `otel` | No | Optional OpenTelemetry config for spans, metrics, and log records |
+
+## OpenTelemetry
+
+OpenTelemetry instrumentation is opt-in. When `otel.enabled` is `true`, the adapter emits spans, metrics, and bridged log records.
+
+```typescript
+import { createiMessageAdapter } from "chat-adapter-imessage";
+
+const adapter = createiMessageAdapter({
+  local: false,
+  otel: {
+    enabled: true,
+    serviceName: "imessage-bot",
+    redactPII: true,
+  },
+});
+```
+
+### OTel options
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `enabled` | Yes | Enables adapter instrumentation |
+| `tracerProvider` | No | Explicit tracer provider. If omitted, the registered global provider is used |
+| `meterProvider` | No | Explicit meter provider. If omitted, the registered global provider is used |
+| `loggerProvider` | No | Explicit logger provider. If omitted, the registered global provider is used |
+| `serviceName` | No | If set, attached as the `service.name` attribute on emitted spans, metrics, and logs |
+| `redactPII` | No | Redacts phone-number-like chat identifiers in telemetry attributes (default: `true`) |
+
+Notes:
+
+- If `serviceName` is omitted, the adapter does not inject one; your OpenTelemetry SDK/resource configuration remains the source of truth.
+- `startGatewayListener()` flushes whichever providers the adapter is actually using, including resolved global providers.
+- To export telemetry, install and configure an OpenTelemetry SDK/exporter in the consuming app; this package only depends on the API layers.
 
 ## Environment variables
 
