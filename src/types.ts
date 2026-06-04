@@ -1,64 +1,45 @@
+import type { SelectOptionElement } from "chat";
+
 /** Thread ID components for iMessage */
 export interface iMessageThreadId {
   /** Chat GUID (e.g., "iMessage;-;+1234567890") */
   chatGuid: string;
 }
 
-/** Normalized message data from either local or remote SDK */
-export interface iMessageGatewayMessageData {
-  /** Attachments */
-  attachments: iMessageAttachment[];
-  /** Chat GUID this message belongs to */
-  chatId: string;
-  /** Message timestamp (ISO string) */
-  date: string;
-  /** Message GUID */
-  guid: string;
-  /** Whether the message is from the current user */
-  isFromMe: boolean;
-  /** Whether this is a group chat */
-  isGroupChat: boolean;
-  /** Raw data from the SDK */
-  raw?: unknown;
-  /** Sender identifier (phone/email) */
-  sender: string;
-  /** Sender display name */
-  senderName: string | null;
-  /** Source SDK */
-  source: "local" | "remote";
-  /** Message text content */
-  text: string | null;
-}
-
-export interface iMessageAttachment {
-  filename: string;
-  id: string;
-  mimeType: string;
-  size: number;
+/**
+ * Explicit self-hosted iMessage client entry, passed straight through to
+ * spectrum-ts's `imessage.config({ clients: [...] })`.
+ *
+ * - `address`: gRPC endpoint (`host:port`) of an `@photon-ai/advanced-imessage`
+ *   server.
+ * - `token`: auth token for that server.
+ * - `phone`: the number this client sends/receives as (routing key in
+ *   multi-number setups; use the `"shared"` sentinel for single-number).
+ */
+export interface IMessageClientEntry {
+  address: string;
+  phone: string;
+  token: string;
 }
 
 /**
- * Payload shape from imessage-kit's native webhook.
- * The SDK POSTs the Message object directly when webhook config is set.
+ * Bookkeeping for a Chat SDK modal that was rendered as an iMessage native
+ * poll. iMessage poll votes arrive as `poll_option` messages that carry only
+ * the poll's title and the chosen option's title (no poll GUID), so we match
+ * incoming votes back to the originating modal by `${chatGuid}::${pollTitle}`
+ * and keep the original Chat SDK option list to recover each option's `value`.
  */
-export interface NativeWebhookPayload {
-  attachments: Array<{
-    createdAt: string;
-    filename: string;
-    id: string;
-    isImage: boolean;
-    mimeType: string;
-    path: string;
-    size: number;
-  }>;
-  chatId: string;
-  date: string;
-  guid: string;
-  isFromMe: boolean;
-  isGroupChat: boolean;
-  isReaction: boolean;
-  sender: string;
-  senderName: string | null;
-  service: string;
-  text: string | null;
+export interface ModalPollMeta {
+  /** callbackId of the originating modal (routed to `onModalSubmit`). */
+  callbackId: string;
+  /** Optional context id threaded back through `processModalSubmit`. */
+  contextId?: string;
+  /** Original Chat SDK select options (label -> value mapping). */
+  options: SelectOptionElement[];
+  /** Optional private metadata threaded back through `processModalSubmit`. */
+  privateMetadata?: string;
+  /** id of the `Select` child whose value the vote maps to. */
+  selectId: string;
+  /** id of the sent poll message (used as the modal `viewId`). */
+  viewId: string;
 }

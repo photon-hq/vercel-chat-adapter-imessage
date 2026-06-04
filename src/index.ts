@@ -1,15 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { extractFiles, ValidationError } from "@chat-adapter/shared";
-import type { MessageResponse } from "@photon-ai/advanced-imessage-kit";
-import {
-  AdvancedIMessageKit,
-  isPollVote,
-  parsePollVotes,
-} from "@photon-ai/advanced-imessage-kit";
-import type { Message as IMessageLocalMessage } from "@photon-ai/imessage-kit";
-import { IMessageSDK } from "@photon-ai/imessage-kit";
 import type {
   Adapter,
   AdapterPostableMessage,
@@ -23,38 +12,97 @@ import type {
   ModalElement,
   RawMessage,
   SelectElement,
-  SelectOptionElement,
   ThreadInfo,
   WebhookOptions,
 } from "chat";
 import { ConsoleLogger, Message, NotImplementedError, parseMarkdown } from "chat";
+import {
+  attachment as attachmentContent,
+  type Content as SpectrumContent,
+  poll as pollContent,
+  Spectrum,
+  type SpectrumInstance,
+  type Message as SpectrumMessage,
+  type Space as SpectrumSpace,
+  text as textContent,
+} from "spectrum-ts";
+import { imessage } from "spectrum-ts/providers/imessage";
 import { iMessageFormatConverter } from "./markdown";
-import type { iMessageGatewayMessageData, iMessageThreadId } from "./types";
-
-export { iMessageFormatConverter } from "./markdown";
-export type {
-  iMessageGatewayMessageData,
+import type {
+  IMessageClientEntry,
   iMessageThreadId,
-  NativeWebhookPayload,
+  ModalPollMeta,
 } from "./types";
 
+export { iMessageFormatConverter } from "./markdown";
+export type { IMessageClientEntry, iMessageThreadId } from "./types";
+
+/** Provider config shape accepted by `imessage.config(...)`. */
+type IMessageProviderConfig =
+  | { local: true }
+  | { clients?: IMessageClientEntry[]; local?: false };
+
+const SHARED_PHONE = "shared";
+
 export interface iMessageAdapterLocalConfig {
+  /** Unused in local mode; accepted for symmetry/back-compat. */
   apiKey?: string;
   local: true;
   logger: Logger;
+  /** Unused in local mode; accepted for symmetry/back-compat. */
   serverUrl?: string;
 }
 
 export interface iMessageAdapterRemoteConfig {
-  apiKey: string;
+  /** Legacy self-host token. Mapped to a `clients` entry's `token`. */
+  apiKey?: string;
+  /** Explicit self-host gRPC clients (advanced). */
+  clients?: IMessageClientEntry | IMessageClientEntry[];
   local: false;
   logger: Logger;
-  serverUrl: string;
+  /** Routing/identity phone for legacy self-host (defaults to `"shared"`). */
+  phone?: string;
+  /** Spectrum Cloud project id (recommended remote path). */
+  projectId?: string;
+  /** Spectrum Cloud project secret (recommended remote path). */
+  projectSecret?: string;
+  /** Legacy self-host endpoint. Now a gRPC `host:port` (see README). */
+  serverUrl?: string;
 }
 
 export type iMessageAdapterConfig =
   | iMessageAdapterLocalConfig
   | iMessageAdapterRemoteConfig;
+
+export interface CreateiMessageAdapterOptions {
+  apiKey?: string;
+  clients?: IMessageClientEntry | IMessageClientEntry[];
+  local?: boolean;
+  logger?: Logger;
+  phone?: string;
+  projectId?: string;
+  projectSecret?: string;
+  serverUrl?: string;
+}
+
+/**
+ * Normalize a legacy `serverUrl` into a gRPC `host:port` address.
+ *
+ * `@photon-ai/advanced-imessage` (the transport spectrum-ts uses) speaks gRPC,
+ * not HTTP/Socket.IO, so any scheme is stripped and a default `:443` port is
+ * appended when none is present.
+ */
+export function deriveAddress(serverUrl: string): string {
+  const stripped = serverUrl
+    .trim()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//i, "")
+    .replace(/\/.*$/, "");
+  return stripped.includes(":") ? stripped : `${stripped}:443`;
+}
+
+const MAX_CACHED_SPACES = 256;
+const MAX_CACHED_MESSAGES = 1024;
+const TYPING_DURATION_MS = 3000;
 
 export class iMessageAdapter implements Adapter {
   readonly name = "imessage";
@@ -62,21 +110,31 @@ export class iMessageAdapter implements Adapter {
   readonly local: boolean;
   readonly serverUrl?: string;
   readonly apiKey?: string;
-  readonly sdk: IMessageSDK | AdvancedIMessageKit;
+  readonly projectId?: string;
+  readonly projectSecret?: string;
+  readonly clients?: IMessageClientEntry[];
+  readonly phone?: string;
+
+  /** The spectrum-ts instance — null until `initialize()` runs. */
+  app: SpectrumInstance | null = null;
 
   private chat: ChatInstance | null = null;
   private readonly logger: Logger;
   private readonly formatConverter = new iMessageFormatConverter();
-  private readonly modalPollMap = new Map<
-    string,
-    {
-      callbackId: string;
-      selectId: string;
-      options: SelectOptionElement[];
-      contextId?: string;
-      privateMetadata?: string;
-    }
-  >();
+
+  /** chatGuid -> last-seen Space (for stateless threadId-addressed sends). */
+  private readonly spaceCache = new Map<string, SpectrumSpace>();
+  /** messageId -> last-seen Message (for react/edit by id). */
+  private readonly messageCache = new Map<string, SpectrumMessage>();
+  /** poll viewId -> modal bookkeeping. */
+  private readonly modalPollMap = new Map<string, ModalPollMeta>();
+  /** `${chatGuid}::${pollTitle}` -> modal bookkeeping (vote routing). */
+  private readonly modalPollByTitle = new Map<string, ModalPollMeta>();
+
+  private gatewayOptions?: WebhookOptions;
+  private pumpStarted = false;
+  private pumpIterator: AsyncIterator<[SpectrumSpace, SpectrumMessage]> | null =
+    null;
 
   constructor(config: iMessageAdapterConfig) {
     if (config.local && process.platform !== "darwin") {
@@ -88,38 +146,83 @@ export class iMessageAdapter implements Adapter {
     }
 
     this.local = config.local;
+    this.logger = config.logger;
     this.serverUrl = config.serverUrl;
     this.apiKey = config.apiKey;
-    this.logger = config.logger;
 
-    if (config.local) {
-      this.sdk = new IMessageSDK();
-    } else {
-      this.sdk = AdvancedIMessageKit.getInstance({
-        serverUrl: config.serverUrl,
-        apiKey: config.apiKey,
-      });
+    if (!config.local) {
+      this.projectId = config.projectId;
+      this.projectSecret = config.projectSecret;
+      this.phone = config.phone;
+      this.clients = config.clients
+        ? Array.isArray(config.clients)
+          ? config.clients
+          : [config.clients]
+        : undefined;
     }
   }
 
   async initialize(chat: ChatInstance): Promise<void> {
     this.chat = chat;
+
+    const { providerConfig, projectId, projectSecret } =
+      this.buildSpectrumConfig();
+    const providers = [imessage.config(providerConfig)];
+
+    this.app =
+      projectId && projectSecret
+        ? await Spectrum({ providers, projectId, projectSecret })
+        : await Spectrum({ providers });
+
     this.logger.info("iMessage adapter initialized", {
       local: this.local,
-      serverUrl: this.serverUrl ? "configured" : "not configured",
+      mode: this.local ? "local" : projectId ? "cloud" : "self-host",
     });
+  }
 
-    if (!this.local) {
-      const sdk = this.sdk as AdvancedIMessageKit;
-      await sdk.connect();
-      await new Promise<void>((resolve) => sdk.once("ready", resolve));
+  private buildSpectrumConfig(): {
+    projectId?: string;
+    projectSecret?: string;
+    providerConfig: IMessageProviderConfig;
+  } {
+    if (this.local) {
+      return { providerConfig: { local: true } };
     }
+    if (this.projectId && this.projectSecret) {
+      return {
+        providerConfig: {},
+        projectId: this.projectId,
+        projectSecret: this.projectSecret,
+      };
+    }
+    if (this.clients?.length) {
+      return { providerConfig: { clients: this.clients } };
+    }
+    if (this.serverUrl && this.apiKey) {
+      return {
+        providerConfig: {
+          clients: [
+            {
+              address: deriveAddress(this.serverUrl),
+              token: this.apiKey,
+              phone: this.phone ?? SHARED_PHONE,
+            },
+          ],
+        },
+      };
+    }
+    throw new ValidationError(
+      "imessage",
+      "Remote mode requires Spectrum Cloud credentials (projectId + projectSecret), explicit clients, or serverUrl + apiKey."
+    );
   }
 
   async handleWebhook(
     _request: Request,
     _options?: WebhookOptions
   ): Promise<Response> {
+    // The iMessage provider is not webhook (fusor) based — receive messages
+    // via startGatewayListener() instead.
     return new Response("Webhook not supported -- use startGatewayListener()", {
       status: 501,
     });
@@ -129,58 +232,28 @@ export class iMessageAdapter implements Adapter {
     threadId: string,
     message: AdapterPostableMessage
   ): Promise<RawMessage> {
-    const { chatGuid } = this.decodeThreadId(threadId);
+    const space = this.requireSpace(threadId, "postMessage");
 
-    const text = this.formatConverter.renderPostable(message);
+    const body = this.formatConverter.renderPostable(message);
     const files = extractFiles(message);
-    const tempFiles =
-      files.length > 0 ? await this.writeTempFiles(files) : null;
 
-    try {
-      if (this.local) {
-        const sdk = this.sdk as IMessageSDK;
-        const recipient = chatGuid.split(";").pop() ?? chatGuid;
-        const content = tempFiles?.paths.length
-          ? { text: text || undefined, files: tempFiles.paths }
-          : text;
-        const result = await sdk.send(recipient, content);
-        return {
-          id: result.message?.guid ?? `local-${Date.now()}`,
-          threadId,
-          raw: result,
-        };
-      }
+    let first: SpectrumMessage | undefined;
 
-      const sdk = this.sdk as AdvancedIMessageKit;
-      let result: MessageResponse | undefined;
-
-      if (text || !tempFiles) {
-        result = await sdk.messages.sendMessage({
-          chatGuid,
-          message: text,
-        });
-      }
-
-      if (tempFiles) {
-        for (const filePath of tempFiles.paths) {
-          const attachmentResult = await sdk.attachments.sendAttachment({
-            chatGuid,
-            filePath,
-          });
-          result ??= attachmentResult;
-        }
-      }
-
-      return {
-        id: result?.guid ?? `msg-${Date.now()}`,
-        threadId,
-        raw: result,
-      };
-    } finally {
-      if (tempFiles) {
-        await rm(tempFiles.dir, { recursive: true }).catch(() => {});
-      }
+    if (body && body.trim().length > 0) {
+      first = (await space.send(textContent(body))) ?? first;
     }
+
+    for (const file of files) {
+      const built = await this.toAttachment(file);
+      const sent = (await space.send(built)) ?? undefined;
+      first ??= sent;
+    }
+
+    return {
+      id: first?.id ?? `msg-${Date.now()}`,
+      threadId,
+      raw: first,
+    };
   }
 
   async editMessage(
@@ -195,18 +268,18 @@ export class iMessageAdapter implements Adapter {
       );
     }
 
-    const text = this.formatConverter.renderPostable(message);
-    const sdk = this.sdk as AdvancedIMessageKit;
-    const result = await sdk.messages.editMessage({
-      messageGuid: messageId,
-      editedMessage: text,
-      backwardsCompatibilityMessage: text,
-    });
-    return {
-      id: result.guid,
-      threadId,
-      raw: result,
-    };
+    const target = await this.resolveMessage(threadId, messageId);
+    if (!target) {
+      throw new NotImplementedError(
+        "editMessage requires the original message to have been received in this session",
+        "editMessage"
+      );
+    }
+
+    const body = this.formatConverter.renderPostable(message);
+    await target.edit(textContent(body));
+
+    return { id: messageId, threadId, raw: target };
   }
 
   async deleteMessage(_threadId: string, _messageId: string): Promise<void> {
@@ -217,54 +290,25 @@ export class iMessageAdapter implements Adapter {
   }
 
   parseMessage(raw: unknown): Message {
-    const data = this.local
-      ? this.normalizeLocalMessage(raw as IMessageLocalMessage)
-      : this.normalizeRemoteMessage(raw as MessageResponse);
-    return this.buildMessage(data);
+    const message = raw as SpectrumMessage;
+    return this.buildFromSpectrum(message, message.space);
   }
 
   async fetchMessages(
-    threadId: string,
-    options?: FetchOptions
+    _threadId: string,
+    _options?: FetchOptions
   ): Promise<FetchResult> {
-    const { chatGuid } = this.decodeThreadId(threadId);
-    const direction = options?.direction ?? "backward";
-    const limit = options?.limit ?? 50;
-    const cursor = options?.cursor;
-
-    if (this.local) {
-      return this.fetchMessagesLocal(chatGuid, direction, limit, cursor);
-    }
-
-    return this.fetchMessagesRemote(chatGuid, direction, limit, cursor);
+    throw new NotImplementedError(
+      "fetchMessages (message history) is not supported by spectrum-ts",
+      "fetchMessages"
+    );
   }
 
-  async fetchThread(threadId: string): Promise<ThreadInfo> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "fetchThread is not supported in local mode",
-        "fetchThread"
-      );
-    }
-
-    const { chatGuid } = this.decodeThreadId(threadId);
-    const sdk = this.sdk as AdvancedIMessageKit;
-    const chat = await sdk.chats.getChat(chatGuid);
-    const isDM = chatGuid.includes(";-;");
-
-    return {
-      id: threadId,
-      channelId: chatGuid,
-      channelName: chat.displayName || undefined,
-      isDM,
-      metadata: {
-        chatIdentifier: chat.chatIdentifier,
-        style: chat.style,
-        participants: chat.participants,
-        isArchived: chat.isArchived,
-        raw: chat,
-      },
-    };
+  async fetchThread(_threadId: string): Promise<ThreadInfo> {
+    throw new NotImplementedError(
+      "fetchThread (chat info) is not supported by spectrum-ts",
+      "fetchThread"
+    );
   }
 
   async addReaction(
@@ -279,36 +323,27 @@ export class iMessageAdapter implements Adapter {
       );
     }
 
-    const tapback = this.emojiToTapback(emoji);
-    const { chatGuid } = this.decodeThreadId(threadId);
-    const sdk = this.sdk as AdvancedIMessageKit;
-    await sdk.messages.sendReaction({
-      chatGuid,
-      messageGuid: messageId,
-      reaction: tapback,
-    });
-  }
-
-  async removeReaction(
-    threadId: string,
-    messageId: string,
-    emoji: EmojiValue | string
-  ): Promise<void> {
-    if (this.local) {
+    const glyph = this.emojiToGlyph(emoji);
+    const target = await this.resolveMessage(threadId, messageId);
+    if (!target) {
       throw new NotImplementedError(
-        "removeReaction is not supported in local mode",
-        "removeReaction"
+        "addReaction requires the target message to have been received in this session",
+        "addReaction"
       );
     }
 
-    const tapback = this.emojiToTapback(emoji);
-    const { chatGuid } = this.decodeThreadId(threadId);
-    const sdk = this.sdk as AdvancedIMessageKit;
-    await sdk.messages.sendReaction({
-      chatGuid,
-      messageGuid: messageId,
-      reaction: `-${tapback}`,
-    });
+    await target.react(glyph);
+  }
+
+  async removeReaction(
+    _threadId: string,
+    _messageId: string,
+    _emoji: EmojiValue | string
+  ): Promise<void> {
+    throw new NotImplementedError(
+      "removeReaction is not supported (spectrum-ts has no reaction-removal API)",
+      "removeReaction"
+    );
   }
 
   async startTyping(threadId: string, _status?: string): Promise<void> {
@@ -319,10 +354,11 @@ export class iMessageAdapter implements Adapter {
       );
     }
 
-    const { chatGuid } = this.decodeThreadId(threadId);
-    const sdk = this.sdk as AdvancedIMessageKit;
-    await sdk.chats.startTyping(chatGuid);
-    setTimeout(() => sdk.chats.stopTyping(chatGuid), 3000);
+    const space = this.requireSpace(threadId, "startTyping");
+    await space.startTyping();
+    setTimeout(() => {
+      void space.stopTyping().catch(() => {});
+    }, TYPING_DURATION_MS);
   }
 
   async openModal(
@@ -347,24 +383,32 @@ export class iMessageAdapter implements Adapter {
       );
     }
 
+    const labels = select.options.map((o) => o.label);
+    if (labels.length < 2 || labels.length > 10) {
+      throw new ValidationError(
+        "imessage",
+        `iMessage polls require between 2 and 10 options, received ${labels.length}`
+      );
+    }
+
     const { chatGuid } = this.decodeThreadId(triggerId);
-    const sdk = this.sdk as AdvancedIMessageKit;
+    const space = this.requireSpace(triggerId, "openModal");
 
-    const result = await sdk.polls.create({
-      chatGuid,
-      title: modal.title,
-      options: select.options.map((o) => o.label),
-    });
+    const sent = await space.send(pollContent(modal.title, labels));
+    const viewId = sent?.id ?? `poll-${Date.now()}`;
 
-    this.modalPollMap.set(result.guid, {
+    const meta: ModalPollMeta = {
+      viewId,
       callbackId: modal.callbackId,
       selectId: select.id,
       options: select.options,
       contextId,
       privateMetadata: modal.privateMetadata,
-    });
+    };
+    this.modalPollMap.set(viewId, meta);
+    this.modalPollByTitle.set(this.pollKey(chatGuid, modal.title), meta);
 
-    return { viewId: result.guid };
+    return { viewId };
   }
 
   renderFormatted(content: FormattedContent): string {
@@ -398,9 +442,11 @@ export class iMessageAdapter implements Adapter {
     if (!this.chat) {
       return new Response("Chat instance not initialized", { status: 500 });
     }
-
     if (!options.waitUntil) {
       return new Response("waitUntil not provided", { status: 500 });
+    }
+    if (!this.app) {
+      return new Response("Adapter not initialized", { status: 500 });
     }
 
     this.logger.info("Starting iMessage Gateway listener", {
@@ -408,7 +454,25 @@ export class iMessageAdapter implements Adapter {
       mode: this.local ? "local" : "remote",
     });
 
-    const listenerPromise = this.runGatewayListener(durationMs, abortSignal, options);
+    this.gatewayOptions = options;
+    this.ensurePump();
+
+    const listenerPromise = new Promise<void>((resolve) => {
+      const timeout = setTimeout(resolve, durationMs);
+      if (abortSignal) {
+        const onAbort = () => {
+          this.logger.info("iMessage Gateway listener received abort signal");
+          clearTimeout(timeout);
+          this.stopPump();
+          resolve();
+        };
+        if (abortSignal.aborted) {
+          onAbort();
+          return;
+        }
+        abortSignal.addEventListener("abort", onAbort, { once: true });
+      }
+    });
     options.waitUntil(listenerPromise);
 
     return new Response(
@@ -425,376 +489,332 @@ export class iMessageAdapter implements Adapter {
     );
   }
 
-  private async runGatewayListener(
-    durationMs: number,
-    abortSignal?: AbortSignal,
-    options?: WebhookOptions
-  ): Promise<void> {
-    let isShuttingDown = false;
-    let remoteGatewaySdk: AdvancedIMessageKit | null = null;
+  /**
+   * Start the single, long-lived consumer of `app.messages`. One persistent
+   * pump (rather than a fresh subscription per gateway call) avoids dropping
+   * an in-flight message on timeout and keeps the connection warm across
+   * overlapping cron windows. Idempotent.
+   */
+  private ensurePump(): void {
+    if (this.pumpStarted || !this.app) {
+      return;
+    }
+    this.pumpStarted = true;
 
-    try {
-      if (this.local) {
-        const sdk = this.sdk as IMessageSDK;
-        await sdk.startWatching({
-          onMessage: async (message: IMessageLocalMessage) => {
-            if (isShuttingDown) return;
-            if (message.isFromMe) return;
-            const data = this.normalizeLocalMessage(message);
-            this.handleGatewayMessage(data);
-          },
-          onError: (error: Error) => {
-            this.logger.error("iMessage local watcher error", {
+    const iterator = this.app.messages[Symbol.asyncIterator]();
+    this.pumpIterator = iterator;
+
+    void (async () => {
+      try {
+        while (true) {
+          const next = await iterator.next();
+          if (next.done) {
+            break;
+          }
+          const [space, message] = next.value;
+          try {
+            await this.routeInbound(space, message, this.gatewayOptions);
+          } catch (error) {
+            this.logger.error("iMessage inbound handler error", {
               error: String(error),
             });
-          },
-        });
-      } else {
-        remoteGatewaySdk = new AdvancedIMessageKit({
-          serverUrl: this.serverUrl,
-          apiKey: this.apiKey,
-        });
-        await remoteGatewaySdk.connect();
-
-        remoteGatewaySdk.on(
-          "new-message",
-          async (messageResponse: MessageResponse) => {
-            if (isShuttingDown) return;
-            if (messageResponse.isFromMe) return;
-
-            if (isPollVote(messageResponse)) {
-              this.handlePollVoteAsModalSubmit(messageResponse, options);
-              return;
-            }
-
-            const data = this.normalizeRemoteMessage(messageResponse);
-            this.handleGatewayMessage(data);
           }
-        );
-      }
-
-      await new Promise<void>((resolve) => {
-        const timeout = setTimeout(resolve, durationMs);
-        if (abortSignal) {
-          if (abortSignal.aborted) {
-            clearTimeout(timeout);
-            resolve();
-            return;
-          }
-          abortSignal.addEventListener(
-            "abort",
-            () => {
-              this.logger.info(
-                "iMessage Gateway listener received abort signal"
-              );
-              clearTimeout(timeout);
-              resolve();
-            },
-            { once: true }
-          );
         }
-      });
-
-      this.logger.info(
-        "iMessage Gateway listener duration elapsed, disconnecting"
-      );
-    } catch (error) {
-      this.logger.error("iMessage Gateway listener error", {
-        error: String(error),
-      });
-    } finally {
-      isShuttingDown = true;
-      if (this.local) {
-        (this.sdk as IMessageSDK).stopWatching();
-      } else if (remoteGatewaySdk) {
-        await remoteGatewaySdk.close();
+      } catch (error) {
+        this.logger.error("iMessage message stream error", {
+          error: String(error),
+        });
+      } finally {
+        this.logger.info("iMessage Gateway listener stopped");
       }
-      this.logger.info("iMessage Gateway listener stopped");
+    })();
+  }
+
+  private stopPump(): void {
+    const iterator = this.pumpIterator;
+    this.pumpIterator = null;
+    this.pumpStarted = false;
+    if (iterator?.return) {
+      void iterator.return();
     }
   }
 
-  private handlePollVoteAsModalSubmit(
-    messageResponse: MessageResponse,
+  private async routeInbound(
+    space: SpectrumSpace,
+    message: SpectrumMessage,
     options?: WebhookOptions
-  ): void {
-    if (!this.chat) return;
-
-    const pollGuid = messageResponse.associatedMessageGuid;
-    if (!pollGuid) {
-      this.logger.debug("Poll vote missing associatedMessageGuid, skipping");
+  ): Promise<void> {
+    if (!this.chat) {
       return;
     }
 
-    const meta = this.modalPollMap.get(pollGuid);
-    if (!meta) {
-      this.logger.debug("Poll vote for unknown poll, skipping", { pollGuid });
+    this.cacheInbound(space, message);
+
+    const contentType = message.content.type;
+    if (contentType === "poll_option") {
+      this.handlePollOption(space, message, options);
+      return;
+    }
+    if (contentType === "reaction") {
+      // Inbound reactions are not surfaced to Chat SDK (parity with the
+      // previous adapter, which only forwarded text/attachment messages).
+      return;
+    }
+    if (message.direction === "outbound") {
       return;
     }
 
-    const parsed = parsePollVotes(messageResponse);
-    if (!parsed) {
-      this.logger.debug("Failed to parse poll votes", {
-        guid: messageResponse.guid,
-      });
-      return;
-    }
-
-    for (const vote of parsed.votes) {
-      const optionIndex = Number.parseInt(vote.voteOptionIdentifier, 10);
-      const option = Number.isNaN(optionIndex)
-        ? undefined
-        : meta.options[optionIndex];
-      const value = option?.value ?? vote.voteOptionIdentifier;
-
-      this.chat.processModalSubmit(
-        {
-          adapter: this,
-          callbackId: meta.callbackId,
-          privateMetadata: meta.privateMetadata,
-          viewId: pollGuid,
-          user: {
-            userId: vote.participantHandle,
-            userName: vote.participantHandle,
-            fullName: vote.participantHandle,
-            isBot: false,
-            isMe: false,
-          },
-          values: { [meta.selectId]: value },
-          raw: messageResponse,
-        },
-        meta.contextId,
-        options
-      );
-    }
-  }
-
-  private async writeTempFiles(
-    files: FileUpload[]
-  ): Promise<{ dir: string; paths: string[] }> {
-    const dir = await mkdtemp(join(tmpdir(), "imessage-"));
-    const paths: string[] = [];
-    for (const file of files) {
-      let buffer: Buffer;
-      if (Buffer.isBuffer(file.data)) {
-        buffer = file.data;
-      } else if (file.data instanceof Blob) {
-        buffer = Buffer.from(await file.data.arrayBuffer());
-      } else {
-        buffer = Buffer.from(file.data as ArrayBuffer);
-      }
-      const filePath = join(dir, file.filename);
-      await writeFile(filePath, buffer);
-      paths.push(filePath);
-    }
-    return { dir, paths };
-  }
-
-  private async fetchMessagesLocal(
-    chatGuid: string,
-    direction: "forward" | "backward",
-    limit: number,
-    cursor?: string
-  ): Promise<FetchResult> {
-    const sdk = this.sdk as IMessageSDK;
-    const since =
-      direction === "forward" && cursor ? new Date(cursor) : undefined;
-    const result = await sdk.getMessages({
-      chatId: chatGuid,
-      limit: 1000,
-      since,
-    });
-
-    let messages = [...result.messages].sort(
-      (a, b) => a.date.getTime() - b.date.getTime()
-    );
-
-    if (direction === "backward" && cursor) {
-      const cursorTime = new Date(cursor).getTime();
-      messages = messages.filter((m) => m.date.getTime() < cursorTime);
-    }
-
-    const isBackward = direction === "backward";
-    const start = isBackward ? Math.max(0, messages.length - limit) : 0;
-    const selected = messages.slice(start, start + limit);
-    const hasMore = isBackward ? start > 0 : messages.length > limit;
-
-    const normalized = selected.map((m) =>
-      this.buildMessage(this.normalizeLocalMessage(m))
-    );
-
-    let nextCursor: string | undefined;
-    if (hasMore && selected.length > 0) {
-      nextCursor = isBackward
-        ? selected[0].date.toISOString()
-        : selected.at(-1)?.date.toISOString();
-    }
-
-    return { messages: normalized, nextCursor };
-  }
-
-  private async fetchMessagesRemote(
-    chatGuid: string,
-    direction: "forward" | "backward",
-    limit: number,
-    cursor?: string
-  ): Promise<FetchResult> {
-    const sdk = this.sdk as AdvancedIMessageKit;
-    const isBackward = direction === "backward";
-
-    const queryOptions: {
-      chatGuid: string;
-      limit: number;
-      sort: "ASC" | "DESC";
-      before?: number;
-      after?: number;
-      with?: string[];
-    } = {
-      chatGuid,
-      limit: limit + 1,
-      sort: isBackward ? "DESC" : "ASC",
-      with: ["chat", "handle", "attachment"],
-    };
-
-    if (cursor) {
-      const timestamp = Number(cursor);
-      if (isBackward) {
-        queryOptions.before = timestamp;
-      } else {
-        queryOptions.after = timestamp;
-      }
-    }
-
-    const results = await sdk.messages.getMessages(queryOptions);
-    const hasMore = results.length > limit;
-    const sliced = hasMore ? results.slice(0, limit) : results;
-
-    if (isBackward) {
-      sliced.reverse();
-    }
-
-    const normalized = sliced.map((m) =>
-      this.buildMessage(this.normalizeRemoteMessage(m))
-    );
-
-    let nextCursor: string | undefined;
-    if (hasMore && sliced.length > 0) {
-      nextCursor = isBackward
-        ? String(sliced[0].dateCreated)
-        : String(sliced.at(-1)?.dateCreated);
-    }
-
-    return { messages: normalized, nextCursor };
-  }
-
-  private normalizeLocalMessage(
-    message: IMessageLocalMessage
-  ): iMessageGatewayMessageData {
-    return {
-      guid: message.guid,
-      text: message.text,
-      sender: message.sender,
-      senderName: message.senderName,
-      chatId: message.chatId,
-      isGroupChat: message.isGroupChat,
-      isFromMe: message.isFromMe,
-      date: message.date.toISOString(),
-      attachments: message.attachments.map((a) => ({
-        id: a.id,
-        filename: a.filename,
-        mimeType: a.mimeType,
-        size: a.size,
-      })),
-      source: "local",
-      raw: message,
-    };
-  }
-
-  private normalizeRemoteMessage(
-    messageResponse: MessageResponse
-  ): iMessageGatewayMessageData {
-    const chatGuid = messageResponse.chats?.[0]?.guid ?? "";
-    const isGroupChat = !chatGuid.includes(";-;");
-
-    return {
-      guid: messageResponse.guid,
-      text: messageResponse.text,
-      sender: messageResponse.handle?.address ?? "",
-      senderName: null,
-      chatId: chatGuid,
-      isGroupChat,
-      isFromMe: messageResponse.isFromMe,
-      date: new Date(messageResponse.dateCreated).toISOString(),
-      attachments: (messageResponse.attachments ?? []).map((a) => ({
-        id: a.guid,
-        filename: a.transferName,
-        mimeType: a.mimeType ?? "application/octet-stream",
-        size: a.totalBytes,
-      })),
-      source: "remote",
-      raw: messageResponse,
-    };
-  }
-
-  private buildMessage(data: iMessageGatewayMessageData): Message {
-    const threadId = this.encodeThreadId({ chatGuid: data.chatId });
-    return new Message({
-      id: data.guid,
-      threadId,
-      text: data.text ?? "",
-      formatted: parseMarkdown(data.text ?? ""),
-      author: {
-        userId: data.sender,
-        userName: data.senderName ?? data.sender,
-        fullName: data.senderName ?? data.sender,
-        isBot: false,
-        isMe: data.isFromMe,
-      },
-      metadata: {
-        dateSent: new Date(data.date),
-        edited: false,
-      },
-      attachments: data.attachments.map((a) => ({
-        type: this.getAttachmentType(a.mimeType),
-        name: a.filename,
-        mimeType: a.mimeType,
-        size: a.size,
-      })),
-      raw: data.raw ?? data,
-      isMention: !data.isGroupChat,
-    });
-  }
-
-  private handleGatewayMessage(
-    data: iMessageGatewayMessageData,
-    options?: WebhookOptions
-  ): void {
-    if (!this.chat) return;
-    const chatMessage = this.buildMessage(data);
+    const chatMessage = this.buildFromSpectrum(message, space);
     this.chat.processMessage(this, chatMessage.threadId, chatMessage, options);
   }
 
-  private emojiToTapback(emoji: EmojiValue | string): string {
-    const name = typeof emoji === "string" ? emoji : emoji.name;
-    const tapbackMap: Record<string, string> = {
-      heart: "love",
-      love: "love",
-      thumbs_up: "like",
-      like: "like",
-      thumbs_down: "dislike",
-      dislike: "dislike",
-      laugh: "laugh",
-      emphasize: "emphasize",
-      exclamation: "emphasize",
-      question: "question",
+  private handlePollOption(
+    space: SpectrumSpace,
+    message: SpectrumMessage,
+    options?: WebhookOptions
+  ): void {
+    if (!this.chat) {
+      return;
+    }
+    const content = message.content;
+    if (content.type !== "poll_option") {
+      return;
+    }
+    // Only count a cast vote, not a deselection.
+    if (!content.selected) {
+      return;
+    }
+
+    const meta = this.modalPollByTitle.get(
+      this.pollKey(space.id, content.poll.title)
+    );
+    if (!meta) {
+      this.logger.debug("Poll vote for unknown poll, skipping", {
+        title: content.poll.title,
+      });
+      return;
+    }
+
+    const optionIndex = meta.options.findIndex(
+      (o) => o.label === content.option.title
+    );
+    const value =
+      optionIndex >= 0 ? meta.options[optionIndex].value : content.option.title;
+    const handle = message.sender?.id ?? "";
+
+    this.chat.processModalSubmit(
+      {
+        adapter: this,
+        callbackId: meta.callbackId,
+        privateMetadata: meta.privateMetadata,
+        viewId: meta.viewId,
+        user: {
+          userId: handle,
+          userName: handle,
+          fullName: handle,
+          isBot: false,
+          isMe: false,
+        },
+        values: { [meta.selectId]: value },
+        raw: message,
+      },
+      meta.contextId,
+      options
+    );
+  }
+
+  private buildFromSpectrum(
+    message: SpectrumMessage,
+    space: SpectrumSpace
+  ): Message {
+    const chatGuid = space.id;
+    const threadId = this.encodeThreadId({ chatGuid });
+    const text = this.extractText(message.content);
+    const sender = message.sender?.id ?? "";
+    const isDM = chatGuid.includes(";-;");
+
+    return new Message({
+      id: message.id,
+      threadId,
+      text,
+      formatted: parseMarkdown(text),
+      author: {
+        userId: sender,
+        userName: sender,
+        fullName: sender,
+        isBot: false,
+        isMe: message.direction === "outbound",
+      },
+      metadata: {
+        dateSent: message.timestamp,
+        edited: false,
+      },
+      attachments: this.extractAttachments(message.content).map((a) => ({
+        type: this.getAttachmentType(a.mimeType),
+        name: a.name,
+        mimeType: a.mimeType,
+        size: a.size ?? 0,
+      })),
+      raw: message,
+      isMention: isDM,
+    });
+  }
+
+  private extractText(content: SpectrumContent): string {
+    switch (content.type) {
+      case "text":
+        return content.text;
+      case "richlink":
+        return String(content.url);
+      case "poll":
+        return content.title;
+      case "group":
+        return content.items
+          .map((item) => this.extractText(item.content))
+          .filter((t) => t.length > 0)
+          .join("\n");
+      default:
+        return "";
+    }
+  }
+
+  private extractAttachments(
+    content: SpectrumContent
+  ): Array<{ mimeType: string; name: string; size?: number }> {
+    const out: Array<{ mimeType: string; name: string; size?: number }> = [];
+    const visit = (c: SpectrumContent): void => {
+      if (c.type === "attachment") {
+        out.push({ name: c.name, mimeType: c.mimeType, size: c.size });
+      } else if (c.type === "voice") {
+        const voice = c as { mimeType: string; name?: string; size?: number };
+        out.push({
+          name: voice.name ?? "voice",
+          mimeType: voice.mimeType,
+          size: voice.size,
+        });
+      } else if (c.type === "group") {
+        for (const item of c.items) {
+          visit(item.content);
+        }
+      }
     };
-    const tapback = tapbackMap[name];
-    if (!tapback) {
+    visit(content);
+    return out;
+  }
+
+  private cacheInbound(space: SpectrumSpace, message: SpectrumMessage): void {
+    this.spaceCache.set(space.id, space);
+    this.evict(this.spaceCache, MAX_CACHED_SPACES);
+
+    this.cacheMessage(message);
+    if (message.content.type === "group") {
+      for (const item of message.content.items) {
+        this.cacheMessage(item);
+      }
+    }
+  }
+
+  private cacheMessage(message: SpectrumMessage): void {
+    this.messageCache.set(message.id, message);
+    this.evict(this.messageCache, MAX_CACHED_MESSAGES);
+  }
+
+  private evict(map: Map<string, unknown>, max: number): void {
+    if (map.size <= max) {
+      return;
+    }
+    const overflow = map.size - max;
+    let removed = 0;
+    for (const key of map.keys()) {
+      if (removed >= overflow) {
+        break;
+      }
+      map.delete(key);
+      removed += 1;
+    }
+  }
+
+  private requireSpace(threadId: string, action: string): SpectrumSpace {
+    const { chatGuid } = this.decodeThreadId(threadId);
+    const space = this.spaceCache.get(chatGuid);
+    if (!space) {
+      throw new NotImplementedError(
+        `${action} requires a thread that was received in this session; ` +
+          "spectrum-ts cannot construct a Space from a chatGuid (no proactive/cold sends). " +
+          "Respond within a received message's thread instead.",
+        action
+      );
+    }
+    return space;
+  }
+
+  private async resolveMessage(
+    threadId: string,
+    messageId: string
+  ): Promise<SpectrumMessage | undefined> {
+    const cached = this.messageCache.get(messageId);
+    if (cached) {
+      return cached;
+    }
+    const { chatGuid } = this.decodeThreadId(threadId);
+    const space = this.spaceCache.get(chatGuid);
+    if (!space) {
+      return undefined;
+    }
+    return (await space.getMessage(messageId)) ?? undefined;
+  }
+
+  private async toAttachment(file: FileUpload) {
+    const data = file.data;
+    let buffer: Buffer;
+    if (Buffer.isBuffer(data)) {
+      buffer = data;
+    } else if (data instanceof Blob) {
+      buffer = Buffer.from(await data.arrayBuffer());
+    } else {
+      buffer = Buffer.from(data as ArrayBuffer);
+    }
+
+    const name = file.filename || "attachment";
+    const mimeType = (file as { mimeType?: string }).mimeType;
+    // `attachment(buffer, …)` derives MIME from `name`'s extension and throws
+    // if it can't — pass an explicit type, or fall back when there's no
+    // extension to resolve from.
+    const options = mimeType
+      ? { name, mimeType }
+      : name.includes(".")
+        ? { name }
+        : { name, mimeType: "application/octet-stream" };
+
+    return attachmentContent(buffer, options);
+  }
+
+  private pollKey(chatGuid: string, title: string): string {
+    return `${chatGuid}::${title}`;
+  }
+
+  private emojiToGlyph(emoji: EmojiValue | string): string {
+    const name = typeof emoji === "string" ? emoji : emoji.name;
+    const glyphMap: Record<string, string> = {
+      heart: "❤️",
+      love: "❤️",
+      thumbs_up: "👍",
+      like: "👍",
+      thumbs_down: "👎",
+      dislike: "👎",
+      laugh: "😂",
+      emphasize: "‼️",
+      exclamation: "‼️",
+      question: "❓",
+    };
+    const glyph = glyphMap[name];
+    if (!glyph) {
       throw new ValidationError(
         "imessage",
         `Unsupported iMessage tapback: "${name}". Supported: heart, thumbs_up, thumbs_down, laugh, emphasize, question`
       );
     }
-    return tapback;
+    return glyph;
   }
 
   private getAttachmentType(
@@ -809,7 +829,7 @@ export class iMessageAdapter implements Adapter {
 }
 
 export function createiMessageAdapter(
-  config?: Partial<iMessageAdapterConfig>
+  config?: CreateiMessageAdapterOptions
 ): iMessageAdapter {
   const local = config?.local ?? process.env.IMESSAGE_LOCAL !== "false";
   const logger = config?.logger ?? new ConsoleLogger("info").child("imessage");
@@ -823,26 +843,40 @@ export function createiMessageAdapter(
     });
   }
 
+  const projectId = config?.projectId ?? process.env.IMESSAGE_PROJECT_ID;
+  const projectSecret =
+    config?.projectSecret ?? process.env.IMESSAGE_PROJECT_SECRET;
+  const clients = config?.clients;
   const serverUrl = config?.serverUrl ?? process.env.IMESSAGE_SERVER_URL;
-  if (!serverUrl) {
-    throw new ValidationError(
-      "imessage",
-      "serverUrl is required when local is false. Set IMESSAGE_SERVER_URL or provide it in config."
-    );
-  }
-
   const apiKey = config?.apiKey ?? process.env.IMESSAGE_API_KEY;
-  if (!apiKey) {
-    throw new ValidationError(
-      "imessage",
-      "apiKey is required when local is false. Set IMESSAGE_API_KEY or provide it in config."
-    );
+  const phone = config?.phone ?? process.env.IMESSAGE_PHONE;
+
+  const hasCloud = Boolean(projectId && projectSecret);
+  const hasClients = Boolean(clients);
+
+  if (!hasCloud && !hasClients) {
+    if (!serverUrl) {
+      throw new ValidationError(
+        "imessage",
+        "serverUrl is required when local is false. Set IMESSAGE_SERVER_URL (or use IMESSAGE_PROJECT_ID/IMESSAGE_PROJECT_SECRET for Spectrum Cloud), or provide it in config."
+      );
+    }
+    if (!apiKey) {
+      throw new ValidationError(
+        "imessage",
+        "apiKey is required when local is false. Set IMESSAGE_API_KEY or provide it in config."
+      );
+    }
   }
 
   return new iMessageAdapter({
     local: false,
     logger,
+    projectId,
+    projectSecret,
+    clients,
     serverUrl,
     apiKey,
+    phone,
   });
 }

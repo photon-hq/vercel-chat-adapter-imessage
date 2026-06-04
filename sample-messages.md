@@ -1,102 +1,56 @@
-# iMessage Webhook Payload Examples
+# iMessage Message Reference
 
-## Forwarded Gateway Event (DM)
+Messages are received via `startGatewayListener()`, which consumes spectrum-ts's
+message stream and delivers each inbound message to your bot as a Chat SDK
+`Message`. There is no raw webhook payload to handle — `handleWebhook()` returns
+`501`.
 
-POST to webhook with `x-imessage-gateway-token` header.
+## Inbound message (as delivered to Chat SDK)
 
-```json
+A direct message arrives as a Chat SDK `Message`:
+
+```jsonc
 {
-  "type": "GATEWAY_NEW_MESSAGE",
-  "timestamp": 1709136000000,
-  "data": {
-    "guid": "p:0/XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
-    "text": "Hello!",
-    "sender": "+1234567890",
-    "senderName": "John Doe",
-    "chatId": "iMessage;-;+1234567890",
-    "isGroupChat": false,
-    "isFromMe": false,
-    "date": "2024-02-28T12:00:00.000Z",
-    "attachments": [],
-    "source": "remote"
-  }
+  "id": "p:0/XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
+  "threadId": "imessage:iMessage;-;+1234567890",
+  "text": "Hello!",
+  "author": {
+    "userId": "+1234567890",
+    "userName": "+1234567890",
+    "fullName": "+1234567890",
+    "isBot": false,
+    "isMe": false
+  },
+  "attachments": [],
+  "metadata": { "dateSent": "2026-02-28T12:00:00.000Z", "edited": false },
+  "isMention": true
+  // `raw` holds the underlying spectrum-ts Message
 }
 ```
 
-## Forwarded Gateway Event (Group Chat)
+A group message is the same shape with a `;+;` `threadId` and `isMention: false`.
+The original sender's display name is not exposed by spectrum-ts, so `userName`
+and `fullName` fall back to the handle (phone/email).
 
-```json
+## Attachments
+
+Attachments are surfaced as metadata on the Chat SDK `Message`:
+
+```jsonc
 {
-  "type": "GATEWAY_NEW_MESSAGE",
-  "timestamp": 1709136060000,
-  "data": {
-    "guid": "p:0/YYYYYYYY-YYYY-YYYY-YYYY-YYYYYYYYYYYY",
-    "text": "Hey everyone",
-    "sender": "+1987654321",
-    "senderName": null,
-    "chatId": "iMessage;+;chat493787071395575843",
-    "isGroupChat": true,
-    "isFromMe": false,
-    "date": "2024-02-28T12:01:00.000Z",
-    "attachments": [],
-    "source": "remote"
-  }
-}
-```
-
-## iMessage Kit (use local iMessage service)
-
-Sent directly by the imessage-kit SDK when `webhook` config is set. Uses the same
-`x-imessage-gateway-token` header.
-
-```json
-{
-  "guid": "p:0/ZZZZZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZZZZZZZZZ",
-  "text": "Check this out",
-  "sender": "+1987654321",
-  "senderName": "Jane Smith",
-  "chatId": "iMessage;-;+1987654321",
-  "isGroupChat": false,
-  "isFromMe": false,
-  "isReaction": false,
-  "service": "iMessage",
-  "date": "2024-02-28T12:02:00.000Z",
   "attachments": [
-    {
-      "id": "att-001",
-      "filename": "photo.jpg",
-      "mimeType": "image/jpeg",
-      "size": 12345,
-      "path": "/tmp/Attachments/photo.jpg",
-      "isImage": true,
-      "createdAt": "2024-02-28T12:02:00.000Z"
-    }
+    { "type": "image", "name": "photo.jpg", "mimeType": "image/jpeg", "size": 12345 }
   ]
 }
 ```
 
-## Advanced iMessage Kit (use [Photon](https://photon.codes) iMessage service)
+`type` is one of `image` / `video` / `audio` / `file`, inferred from the MIME type.
 
-Raw message from `AdvancedIMessageKit` `new-message` event:
+## Poll votes
 
-```json
-{
-  "guid": "p:0/AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
-  "text": "Hello from remote!",
-  "isFromMe": false,
-  "dateCreated": 1709136180000,
-  "handle": {
-    "address": "+1234567890"
-  },
-  "chats": [
-    {
-      "guid": "iMessage;-;+1234567890",
-      "style": 43
-    }
-  ],
-  "attachments": []
-}
-```
+iMessage poll votes (from `openModal()` polls) are **not** delivered as messages.
+They arrive as spectrum-ts `poll_option` content and are routed to your
+`onModalSubmit("<callbackId>")` handler with the selected option's `value`.
 
 ## Chat GUID Patterns
 

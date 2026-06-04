@@ -9,7 +9,7 @@ export default defineConfig({
   external: [
     "chat",
     "@chat-adapter/shared",
-    "@photon-ai/imessage-kit",
-    "@photon-ai/advanced-imessage-kit",
+    "spectrum-ts",
+    "spectrum-ts/providers/imessage",
   ],
 });
