@@ -14,9 +14,10 @@ import {
 // with inspectable passthroughs so we can assert on what was sent.
 // ---------------------------------------------------------------------------
 
-const { mockSpectrum, mockImessageConfig } = vi.hoisted(() => ({
+const { mockSpectrum, mockImessageConfig, mockImessage } = vi.hoisted(() => ({
   mockSpectrum: vi.fn(),
   mockImessageConfig: vi.fn((c: unknown) => ({ __providerConfig: c })),
+  mockImessage: vi.fn(),
 }));
 
 vi.mock("spectrum-ts", () => ({
@@ -35,7 +36,7 @@ vi.mock("spectrum-ts", () => ({
 }));
 
 vi.mock("spectrum-ts/providers/imessage", () => ({
-  imessage: Object.assign(vi.fn(), { config: mockImessageConfig }),
+  imessage: Object.assign(mockImessage, { config: mockImessageConfig }),
 }));
 
 vi.mock("chat", async (importOriginal) => {
@@ -51,6 +52,7 @@ vi.mock("chat", async (importOriginal) => {
   };
 });
 
+import { createHmac } from "node:crypto";
 import { ValidationError } from "@chat-adapter/shared";
 import type { ModalElement } from "chat";
 import { NotImplementedError } from "chat";
@@ -267,6 +269,78 @@ function cloudAdapter(): iMessageAdapter {
   });
 }
 
+const WEBHOOK_SECRET = "whsec_test_0123456789";
+
+function webhookAdapter(webhookSecret = WEBHOOK_SECRET): iMessageAdapter {
+  return new iMessageAdapter({
+    local: false,
+    logger: mockLogger,
+    projectId: "proj",
+    projectSecret: "secret",
+    webhookSecret,
+  });
+}
+
+/**
+ * Build a Spectrum Cloud webhook request, signing the body the way Spectrum
+ * does (`v0=` + HMAC-SHA256 over `v0:{timestamp}:{rawBody}`). Pass `signature`
+ * or `timestamp` to forge an invalid/stale delivery.
+ */
+function signedWebhookRequest(opts: {
+  body: unknown;
+  event?: string;
+  secret?: string;
+  signature?: string;
+  timestamp?: number;
+}): Request {
+  const secret = opts.secret ?? WEBHOOK_SECRET;
+  const rawBody =
+    typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body);
+  const ts = String(opts.timestamp ?? Math.floor(Date.now() / 1000));
+  const signature =
+    opts.signature ??
+    `v0=${createHmac("sha256", secret).update(`v0:${ts}:${rawBody}`).digest("hex")}`;
+  return new Request("https://example.com/api/imessage/webhook", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-spectrum-event": opts.event ?? "messages",
+      "x-spectrum-timestamp": ts,
+      "x-spectrum-signature": signature,
+      "x-spectrum-webhook-id": "wh-test-1",
+    },
+    body: rawBody,
+  });
+}
+
+function textMessagePayload(
+  overrides: {
+    chatGuid?: string;
+    direction?: "inbound" | "outbound";
+    text?: string;
+    content?: unknown;
+  } = {}
+): Record<string, unknown> {
+  const chatGuid = overrides.chatGuid ?? "iMessage;-;+1234567890";
+  const space = { id: chatGuid, platform: "iMessage", type: "dm" };
+  return {
+    event: "messages",
+    space,
+    message: {
+      id: "wh-msg-1",
+      platform: "iMessage",
+      direction: overrides.direction ?? "inbound",
+      timestamp: "2026-05-14T19:06:32.000Z",
+      sender: { id: "+1234567890", platform: "iMessage" },
+      space,
+      content: overrides.content ?? {
+        type: "text",
+        text: overrides.text ?? "hey from webhook",
+      },
+    },
+  };
+}
+
 function localAdapter(): iMessageAdapter {
   return new iMessageAdapter({ local: true, logger: mockLogger });
 }
@@ -318,6 +392,12 @@ beforeEach(() => {
   mockSpectrum.mockReset();
   mockSpectrum.mockResolvedValue(mockApp);
   mockImessageConfig.mockClear();
+  // Default: `imessage(app).space([address])` resolves a DM space over gRPC.
+  // Tests that assert on the resolved space override this per-case.
+  mockImessage.mockReset();
+  mockImessage.mockImplementation(() => ({
+    space: vi.fn(async (users: string[]) => makeSpace(`any;-;${users[0]}`)),
+  }));
   for (const fn of Object.values(mockLogger)) {
     fn.mockClear?.();
   }
@@ -467,13 +547,199 @@ describe("encodeThreadId / decodeThreadId / isDM", () => {
 });
 
 describe("handleWebhook", () => {
-  it("returns 501 (use startGatewayListener)", async () => {
+  it("routes a signed message delivery to processMessage", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    const response = await adapter.handleWebhook(
+      signedWebhookRequest({ body: textMessagePayload() }),
+      { waitUntil: vi.fn() }
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockChat.processMessage).toHaveBeenCalledWith(
+      adapter,
+      "imessage:iMessage;-;+1234567890",
+      expect.objectContaining({ text: "hey from webhook" }),
+      expect.objectContaining({ waitUntil: expect.any(Function) })
+    );
+  });
+
+  it("surfaces attachments from a group delivery", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    await adapter.handleWebhook(
+      signedWebhookRequest({
+        body: textMessagePayload({
+          chatGuid: "iMessage;+;chat123456",
+          content: {
+            type: "group",
+            items: [
+              { content: { type: "text", text: "Photo" } },
+              {
+                content: {
+                  type: "attachment",
+                  name: "photo.jpg",
+                  mimeType: "image/jpeg",
+                  size: 54_321,
+                },
+              },
+            ],
+          },
+        }),
+      })
+    );
+
+    const message = mockChat.processMessage.mock.calls[0]?.[2];
+    expect(message.text).toBe("Photo");
+    expect(message.attachments).toHaveLength(1);
+    expect(message.attachments[0].type).toBe("image");
+  });
+
+  it("rejects a bad signature with 401", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    const response = await adapter.handleWebhook(
+      signedWebhookRequest({
+        body: textMessagePayload(),
+        signature: "v0=deadbeef",
+      })
+    );
+
+    expect(response.status).toBe(401);
+    expect(mockChat.processMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects a delivery with no signature headers (400)", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    const response = await adapter.handleWebhook(
+      new Request("https://example.com/api/imessage/webhook", {
+        method: "POST",
+        headers: { "x-spectrum-event": "messages" },
+        body: JSON.stringify(textMessagePayload()),
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockChat.processMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects a stale timestamp with 400", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    const response = await adapter.handleWebhook(
+      signedWebhookRequest({
+        body: textMessagePayload(),
+        timestamp: Math.floor(Date.now() / 1000) - 10 * 60,
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(mockChat.processMessage).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 when no signing secret is configured", async () => {
+    const adapter = cloudAdapter(); // no webhookSecret
+    await init(adapter);
+
+    const response = await adapter.handleWebhook(
+      signedWebhookRequest({ body: textMessagePayload() })
+    );
+
+    expect(response.status).toBe(500);
+  });
+
+  it("returns 501 in local mode", async () => {
     const adapter = localAdapter();
     await init(adapter);
+
     const response = await adapter.handleWebhook(
       new Request("https://example.com/webhook", { method: "POST", body: "{}" })
     );
+
     expect(response.status).toBe(501);
+  });
+
+  it("returns 500 without a chat instance", async () => {
+    const response = await webhookAdapter().handleWebhook(
+      signedWebhookRequest({ body: textMessagePayload() })
+    );
+    expect(response.status).toBe(500);
+  });
+
+  it("acknowledges non-message events with 204", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    const response = await adapter.handleWebhook(
+      signedWebhookRequest({ body: textMessagePayload(), event: "reactions" })
+    );
+
+    expect(response.status).toBe(204);
+    expect(mockChat.processMessage).not.toHaveBeenCalled();
+  });
+
+  it("ignores the bot's own (outbound) deliveries", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    const response = await adapter.handleWebhook(
+      signedWebhookRequest({
+        body: textMessagePayload({ direction: "outbound" }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockChat.processMessage).not.toHaveBeenCalled();
+  });
+
+  it("ignores inbound reactions", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    const response = await adapter.handleWebhook(
+      signedWebhookRequest({
+        body: textMessagePayload({
+          content: { type: "reaction", emoji: "❤️", target: { id: "m1" } },
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockChat.processMessage).not.toHaveBeenCalled();
+  });
+
+  it("lets the bot reply to a webhook-delivered DM via gRPC", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    // Inbound DM via webhook — no live Space is cached.
+    await adapter.handleWebhook(
+      signedWebhookRequest({
+        body: textMessagePayload({ chatGuid: "any;-;+15550100" }),
+      })
+    );
+    const threadId = mockChat.processMessage.mock.calls[0]?.[1] as string;
+    expect(threadId).toBe("imessage:any;-;+15550100");
+
+    // Reply: the adapter rebuilds the DM Space over gRPC and sends.
+    const replySpace = makeSpace("any;-;+15550100", "dm", { id: "reply-1" });
+    const spaceResolver = vi.fn(async () => replySpace);
+    mockImessage.mockReturnValue({ space: spaceResolver });
+
+    const result = await adapter.postMessage(threadId, "hi back");
+
+    expect(spaceResolver).toHaveBeenCalledWith(["+15550100"]);
+    expect(replySpace.send).toHaveBeenCalledWith({
+      __kind: "text",
+      text: "hi back",
+    });
+    expect(result.id).toBe("reply-1");
   });
 });
 
@@ -581,11 +847,31 @@ describe("postMessage", () => {
     expect(result.threadId).toBe("imessage:iMessage;-;+1234567890");
   });
 
-  it("throws NotImplementedError for a thread not seen this session", async () => {
+  it("cold-sends to a DM not seen this session by rebuilding it over gRPC", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+
+    const coldSpace = makeSpace("any;-;+1999999999", "dm", {
+      id: "cold-msg-1",
+    });
+    const spaceResolver = vi.fn(async () => coldSpace);
+    mockImessage.mockReturnValue({ space: spaceResolver });
+
+    const result = await adapter.postMessage(
+      "imessage:any;-;+1999999999",
+      "Hi"
+    );
+
+    expect(spaceResolver).toHaveBeenCalledWith(["+1999999999"]);
+    expect(coldSpace.send).toHaveBeenCalledWith({ __kind: "text", text: "Hi" });
+    expect(result.id).toBe("cold-msg-1");
+  });
+
+  it("throws NotImplementedError for an unseen group thread", async () => {
     const adapter = cloudAdapter();
     await init(adapter);
     await expect(
-      adapter.postMessage("imessage:iMessage;-;+1999999999", "Hi")
+      adapter.postMessage("imessage:iMessage;+;chatUNSEEN", "Hi")
     ).rejects.toThrow(NotImplementedError);
   });
 
@@ -986,6 +1272,7 @@ describe("createiMessageAdapter", () => {
     vi.stubEnv("IMESSAGE_SERVER_URL", undefined);
     vi.stubEnv("IMESSAGE_API_KEY", undefined);
     vi.stubEnv("IMESSAGE_PHONE", undefined);
+    vi.stubEnv("IMESSAGE_WEBHOOK_SECRET", undefined);
   });
 
   it("defaults to local mode", () => {
@@ -1047,6 +1334,24 @@ describe("createiMessageAdapter", () => {
     const adapter = createiMessageAdapter();
     expect(adapter.local).toBe(false);
     expect(adapter.projectId).toBe("env-proj");
+  });
+
+  it("reads and trims the webhook secret from env", () => {
+    vi.stubEnv("IMESSAGE_PROJECT_ID", "env-proj");
+    vi.stubEnv("IMESSAGE_PROJECT_SECRET", "env-secret");
+    vi.stubEnv("IMESSAGE_WEBHOOK_SECRET", "  whsec_env  ");
+    const adapter = createiMessageAdapter();
+    expect(adapter.webhookSecret).toBe("whsec_env");
+  });
+
+  it("prefers a config webhook secret over env", () => {
+    vi.stubEnv("IMESSAGE_WEBHOOK_SECRET", "whsec_env");
+    const adapter = createiMessageAdapter({
+      projectId: "p",
+      projectSecret: "s",
+      webhookSecret: "whsec_config",
+    });
+    expect(adapter.webhookSecret).toBe("whsec_config");
   });
 
   it("throws when remote mode has no auth at all", () => {

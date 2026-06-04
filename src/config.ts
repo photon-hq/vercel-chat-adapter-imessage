@@ -33,6 +33,8 @@ export interface iMessageAdapterRemoteConfig {
   projectSecret?: string;
   /** Legacy self-host endpoint. Now a gRPC `host:port` (see README). */
   serverUrl?: string;
+  /** Per-webhook signing secret for verifying Spectrum Cloud deliveries. */
+  webhookSecret?: string;
 }
 
 export type iMessageAdapterConfig =
@@ -48,6 +50,7 @@ export interface CreateiMessageAdapterOptions {
   projectId?: string;
   projectSecret?: string;
   serverUrl?: string;
+  webhookSecret?: string;
 }
 
 const URL_SCHEME_RE = /^[a-z][a-z0-9+.-]*:\/\//i;

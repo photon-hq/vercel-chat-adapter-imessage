@@ -28,3 +28,15 @@ export function decodeThreadId(threadId: string): iMessageThreadId {
 export function isDMChatGuid(chatGuid: string): boolean {
   return chatGuid.includes(";-;");
 }
+
+const DM_SEPARATOR = ";-;";
+
+/**
+ * Extract the peer address from a DM chat GUID (`<service>;-;<address>`, e.g.
+ * `any;-;+15550100`). Returns `""` for a non-DM GUID. spectrum-ts rebuilds a
+ * sendable DM `Space` from this address — `imessage(app).space([address])`.
+ */
+export function dmAddressFromChatGuid(chatGuid: string): string {
+  const idx = chatGuid.indexOf(DM_SEPARATOR);
+  return idx === -1 ? "" : chatGuid.slice(idx + DM_SEPARATOR.length);
+}

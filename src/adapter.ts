@@ -33,9 +33,19 @@ import { ModalPollRegistry } from "./internal/modals";
 import { emojiToGlyph, fileToAttachment } from "./internal/outbound";
 import {
   decodeThreadId,
+  dmAddressFromChatGuid,
   encodeThreadId,
   isDMChatGuid,
 } from "./internal/thread";
+import {
+  buildChatMessageFromWebhook,
+  SPECTRUM_EVENT_HEADER,
+  SPECTRUM_MESSAGES_EVENT,
+  SPECTRUM_SIGNATURE_HEADER,
+  SPECTRUM_TIMESTAMP_HEADER,
+  type SpectrumWebhookPayload,
+  verifySpectrumSignature,
+} from "./internal/webhook";
 import { iMessageFormatConverter } from "./markdown";
 import type { IMessageClientEntry, iMessageThreadId } from "./types";
 
@@ -51,6 +61,7 @@ export class iMessageAdapter implements Adapter {
   readonly projectSecret?: string;
   readonly clients?: IMessageClientEntry[];
   readonly phone?: string;
+  readonly webhookSecret?: string;
 
   /** The spectrum-ts instance — null until `initialize()` runs. */
   app: SpectrumInstance | null = null;
@@ -83,6 +94,7 @@ export class iMessageAdapter implements Adapter {
       this.projectSecret = config.projectSecret;
       this.phone = config.phone;
       this.clients = toClientArray(config.clients);
+      this.webhookSecret = config.webhookSecret;
     }
   }
 
@@ -133,22 +145,80 @@ export class iMessageAdapter implements Adapter {
     });
   }
 
+  /**
+   * Handle a Spectrum Cloud webhook delivery (signed JSON `messages` event).
+   *
+   * Verifies the `X-Spectrum-Signature` HMAC, then routes the message into the
+   * Chat SDK. Webhook deliveries are receive-only: a delivered thread has no
+   * live spectrum-ts `Space`, so replying/reacting still requires the gateway
+   * stream (see `startGatewayListener`).
+   *
+   * @see https://photon.codes/docs/webhooks/overview
+   */
   async handleWebhook(
-    _request: Request,
-    _options?: WebhookOptions
+    request: Request,
+    options?: WebhookOptions
   ): Promise<Response> {
-    // The iMessage provider is not webhook (fusor) based — receive messages
-    // via startGatewayListener() instead.
-    return new Response("Webhook not supported -- use startGatewayListener()", {
-      status: 501,
+    if (!this.chat) {
+      return new Response("Chat instance not initialized", { status: 500 });
+    }
+    if (this.local) {
+      return new Response(
+        "Webhooks require remote (cloud) mode — local mode receives via startGatewayListener()",
+        { status: 501 }
+      );
+    }
+    if (!this.webhookSecret) {
+      return new Response(
+        "Webhook signing secret not configured (set IMESSAGE_WEBHOOK_SECRET)",
+        { status: 500 }
+      );
+    }
+
+    // Read the raw body BEFORE parsing: the signature covers the exact bytes.
+    const rawBody = await request.text();
+    const verdict = verifySpectrumSignature({
+      secret: this.webhookSecret,
+      signature: request.headers.get(SPECTRUM_SIGNATURE_HEADER),
+      timestamp: request.headers.get(SPECTRUM_TIMESTAMP_HEADER),
+      rawBody,
     });
+    if (!verdict.ok) {
+      this.logger.warn("Rejected iMessage webhook delivery", {
+        reason: verdict.reason,
+      });
+      return new Response(verdict.reason, { status: verdict.status });
+    }
+
+    const event = request.headers.get(SPECTRUM_EVENT_HEADER);
+    if (event && event !== SPECTRUM_MESSAGES_EVENT) {
+      // Acknowledge unrecognized event types so Cloud does not retry them.
+      return new Response(null, { status: 204 });
+    }
+
+    let payload: SpectrumWebhookPayload;
+    try {
+      payload = JSON.parse(rawBody) as SpectrumWebhookPayload;
+    } catch {
+      return new Response("Invalid JSON body", { status: 400 });
+    }
+
+    if (
+      payload.event !== SPECTRUM_MESSAGES_EVENT ||
+      !(payload.message && payload.space)
+    ) {
+      return new Response(null, { status: 204 });
+    }
+
+    this.routeWebhookMessage(payload, options);
+    return new Response(null, { status: 200 });
   }
 
   async postMessage(
     threadId: string,
     message: AdapterPostableMessage
   ): Promise<RawMessage> {
-    const space = this.requireSpace(threadId, "postMessage");
+    const space = await this.requireSpace(threadId, "postMessage");
     const body = this.formatConverter.renderPostable(message);
     const files = extractFiles(message);
 
@@ -270,7 +340,7 @@ export class iMessageAdapter implements Adapter {
       );
     }
 
-    const space = this.requireSpace(threadId, "startTyping");
+    const space = await this.requireSpace(threadId, "startTyping");
     await space.startTyping();
     setTimeout(() => {
       space.stopTyping().catch(() => {
@@ -310,7 +380,7 @@ export class iMessageAdapter implements Adapter {
     }
 
     const { chatGuid } = decodeThreadId(triggerId);
-    const space = this.requireSpace(triggerId, "openModal");
+    const space = await this.requireSpace(triggerId, "openModal");
 
     const sent = await space.send(pollContent(modal.title, labels));
     const viewId = sent?.id ?? `poll-${Date.now()}`;
@@ -398,6 +468,28 @@ export class iMessageAdapter implements Adapter {
     );
   }
 
+  private routeWebhookMessage(
+    payload: SpectrumWebhookPayload,
+    options?: WebhookOptions
+  ): void {
+    if (!this.chat) {
+      return;
+    }
+
+    const { message, space } = payload;
+    // Parity with the gateway path: surface only inbound text/attachment
+    // messages — skip the bot's own echoes and inbound reactions.
+    if (message.direction === "outbound") {
+      return;
+    }
+    if (message.content?.type === "reaction") {
+      return;
+    }
+
+    const chatMessage = buildChatMessageFromWebhook(message, space);
+    this.chat.processMessage(this, chatMessage.threadId, chatMessage, options);
+  }
+
   private async routeInbound(
     space: SpectrumSpace,
     message: SpectrumMessage,
@@ -481,14 +573,52 @@ export class iMessageAdapter implements Adapter {
     );
   }
 
-  private requireSpace(threadId: string, action: string): SpectrumSpace {
+  /**
+   * Resolve a sendable spectrum-ts `Space` for a thread.
+   *
+   * Prefers a live `Space` cached from the inbound stream (correct sending
+   * line, no extra round-trip). On a miss — e.g. a webhook-only deployment, or
+   * a cold send — it reconstructs the Space over gRPC via
+   * `imessage(app).space([address])`. Only DMs can be rebuilt from a chatGuid:
+   * the resolver derives them from the peer address, whereas an unseen group
+   * has no by-id resolver (passing participants would create a *new* chat).
+   * Returns `undefined` when no Space can be obtained.
+   */
+  private async resolveSpace(
+    threadId: string
+  ): Promise<SpectrumSpace | undefined> {
     const { chatGuid } = decodeThreadId(threadId);
-    const space = this.cache.getSpace(chatGuid);
+    const cached = this.cache.getSpace(chatGuid);
+    if (cached) {
+      return cached;
+    }
+    if (!this.app || this.local || !isDMChatGuid(chatGuid)) {
+      return;
+    }
+    const address = dmAddressFromChatGuid(chatGuid);
+    if (!address) {
+      return;
+    }
+    // `HasProvider` over the default provider tuple won't narrow to `true`, so
+    // the call types as `never`; cast to the slice of the instance we use.
+    const platform = imessage(this.app) as unknown as {
+      space(users: string[]): Promise<SpectrumSpace>;
+    };
+    const space = await platform.space([address]);
+    this.cache.rememberSpace(space);
+    return space;
+  }
+
+  private async requireSpace(
+    threadId: string,
+    action: string
+  ): Promise<SpectrumSpace> {
+    const space = await this.resolveSpace(threadId);
     if (!space) {
       throw new NotImplementedError(
-        `${action} requires a thread that was received in this session; ` +
-          "spectrum-ts cannot construct a Space from a chatGuid (no proactive/cold sends). " +
-          "Respond within a received message's thread instead.",
+        `${action} requires a DM thread (rebuilt from its address) or a group ` +
+          "received in this session; spectrum-ts cannot reconstruct an unseen " +
+          "group chat from its id. Respond within a received message's thread instead.",
         action
       );
     }
@@ -503,8 +633,7 @@ export class iMessageAdapter implements Adapter {
     if (cached) {
       return cached;
     }
-    const { chatGuid } = decodeThreadId(threadId);
-    const space = this.cache.getSpace(chatGuid);
+    const space = await this.resolveSpace(threadId);
     if (!space) {
       return;
     }
