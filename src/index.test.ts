@@ -1,4 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 // ---------------------------------------------------------------------------
 // Mocks: spectrum-ts + its iMessage provider. Content builders are replaced
@@ -50,6 +59,51 @@ import {
   deriveAddress,
   iMessageAdapter,
 } from "./index";
+
+// Local-mode construction requires macOS — pin the platform to `darwin` for the
+// whole suite so it runs on any CI OS. Platform-specific tests override locally.
+const REAL_PLATFORM = Object.getOwnPropertyDescriptor(process, "platform");
+beforeAll(() => {
+  Object.defineProperty(process, "platform", {
+    value: "darwin",
+    configurable: true,
+  });
+});
+afterAll(() => {
+  if (REAL_PLATFORM) {
+    Object.defineProperty(process, "platform", REAL_PLATFORM);
+  }
+});
+
+// Every gateway listener leaves a long `waitUntil` timer + a live message pump
+// running; track them so afterEach can abort and await termination.
+const openListeners: Array<{
+  controller: AbortController;
+  promise: Promise<unknown>;
+}> = [];
+
+async function startTrackedListener(
+  adapter: iMessageAdapter,
+  durationMs = 60000
+): Promise<{
+  controller: AbortController;
+  promise: Promise<unknown>;
+  response: Response;
+  waitUntil: ReturnType<typeof vi.fn>;
+}> {
+  const controller = new AbortController();
+  let promise: Promise<unknown> = Promise.resolve();
+  const waitUntil = vi.fn((task: Promise<unknown>) => {
+    promise = task;
+  });
+  const response = await adapter.startGatewayListener(
+    { waitUntil },
+    durationMs,
+    controller.signal
+  );
+  openListeners.push({ controller, promise });
+  return { controller, promise, response, waitUntil };
+}
 
 // ---------------------------------------------------------------------------
 // Test harness
@@ -246,9 +300,7 @@ async function primeInbound(
     space,
     opts.content ?? { type: "text", text: "hi" }
   );
-  const waitUntil = vi.fn();
-  const controller = new AbortController();
-  await adapter.startGatewayListener({ waitUntil }, 60000, controller.signal);
+  await startTrackedListener(adapter);
   pushInbound([space, message]);
   await vi.waitFor(() => expect(mockChat.processMessage).toHaveBeenCalled());
   return { space, message };
@@ -269,8 +321,15 @@ beforeEach(() => {
   }
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // Real timers first, so clearTimeout in the listener teardown targets the
+  // real (not faked) duration timer.
   vi.useRealTimers();
+  for (const listener of openListeners) {
+    listener.controller.abort();
+  }
+  await Promise.allSettled(openListeners.map((listener) => listener.promise));
+  openListeners.length = 0;
   vi.unstubAllEnvs();
 });
 
@@ -430,8 +489,7 @@ describe("startGatewayListener", () => {
   it("starts listening and returns a success response", async () => {
     const adapter = localAdapter();
     await init(adapter);
-    const waitUntil = vi.fn();
-    const response = await adapter.startGatewayListener({ waitUntil }, 5000);
+    const { response, waitUntil } = await startTrackedListener(adapter, 5000);
     expect(response.status).toBe(200);
     const body = (await response.json()) as Record<string, unknown>;
     expect(body.status).toBe("listening");
@@ -455,13 +513,10 @@ describe("startGatewayListener", () => {
   it("closes the message stream on abort", async () => {
     const adapter = cloudAdapter();
     await init(adapter);
-    const waitUntil = vi.fn();
-    const controller = new AbortController();
-    await adapter.startGatewayListener({ waitUntil }, 60000, controller.signal);
+    const { controller, promise } = await startTrackedListener(adapter);
 
     controller.abort();
-    const listenerPromise = waitUntil.mock.calls[0][0] as Promise<void>;
-    await listenerPromise;
+    await promise;
 
     expect(iteratorReturnSpy).toHaveBeenCalled();
   });
@@ -470,9 +525,7 @@ describe("startGatewayListener", () => {
     const adapter = cloudAdapter();
     await init(adapter);
     const space = makeSpace("iMessage;-;+1234567890");
-    const waitUntil = vi.fn();
-    const controller = new AbortController();
-    await adapter.startGatewayListener({ waitUntil }, 60000, controller.signal);
+    await startTrackedListener(adapter);
 
     pushInbound([
       space,
