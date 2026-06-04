@@ -1,128 +1,41 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
-const LOCAL_ID_PATTERN = /^local-\d+$/;
+// ---------------------------------------------------------------------------
+// Mocks: spectrum-ts + its iMessage provider. Content builders are replaced
+// with inspectable passthroughs so we can assert on what was sent.
+// ---------------------------------------------------------------------------
 
-const {
-  mockStartWatching,
-  mockStopWatching,
-  mockLocalClose,
-  mockSend,
-  mockConnect,
-  mockClose,
-  mockOnce,
-  mockSendMessage,
-  mockEditMessage,
-  mockGetChat,
-  mockSendReaction,
-  mockStartTyping,
-  mockStopTyping,
-  mockGatewayConnect,
-  mockGatewayClose,
-  mockGatewayOn,
-  mockPollCreate,
-  mockProcessModalSubmit,
-  MockAdvancedIMessageKit,
-  mockIsPollVote,
-  mockParsePollVotes,
-} = vi.hoisted(() => {
-  const mockStartWatching = vi.fn();
-  const mockStopWatching = vi.fn();
-  const mockLocalClose = vi.fn();
-  const mockSend = vi.fn();
-  const mockConnect = vi.fn();
-  const mockClose = vi.fn();
-  const mockOn = vi.fn();
-  const mockOnce = vi.fn((_event: string, cb: () => void) => cb());
-  const mockSendMessage = vi.fn();
-  const mockEditMessage = vi.fn();
-  const mockGetChat = vi.fn();
-  const mockSendReaction = vi.fn();
-  const mockStartTyping = vi.fn();
-  const mockStopTyping = vi.fn();
-  const mockGatewayConnect = vi.fn();
-  const mockGatewayClose = vi.fn();
-  const mockGatewayOn = vi.fn();
-  const mockPollCreate = vi.fn();
-  const mockProcessModalSubmit = vi.fn();
-  const mockIsPollVote = vi.fn(() => false);
-  const mockParsePollVotes = vi.fn((): unknown => null);
+const { mockSpectrum, mockImessageConfig } = vi.hoisted(() => ({
+  mockSpectrum: vi.fn(),
+  mockImessageConfig: vi.fn((c: unknown) => ({ __providerConfig: c })),
+}));
 
-  // biome-ignore lint/complexity/useArrowFunction: vitest 4 requires function expressions for constructor mocks
-  const MockAdvancedIMessageKit = vi.fn(function () {
-    return {
-      mocked: true,
-      connect: mockGatewayConnect,
-      close: mockGatewayClose,
-      on: mockGatewayOn,
-      once: vi.fn(),
-      messages: {},
-      chats: {},
-    };
-  });
-  (MockAdvancedIMessageKit as unknown as Record<string, unknown>).getInstance =
-    vi.fn(() => ({
-      mocked: true,
-      connect: mockConnect,
-      close: mockClose,
-      on: mockOn,
-      once: mockOnce,
-      messages: {
-        sendMessage: mockSendMessage,
-        editMessage: mockEditMessage,
-        sendReaction: mockSendReaction,
-      },
-      chats: {
-        getChat: mockGetChat,
-        startTyping: mockStartTyping,
-        stopTyping: mockStopTyping,
-      },
-      polls: {
-        create: mockPollCreate,
-      },
-    }));
-
-  return {
-    mockStartWatching,
-    mockStopWatching,
-    mockLocalClose,
-    mockSend,
-    mockConnect,
-    mockClose,
-    mockOn,
-    mockOnce,
-    mockSendMessage,
-    mockEditMessage,
-    mockGetChat,
-    mockSendReaction,
-    mockStartTyping,
-    mockStopTyping,
-    mockGatewayConnect,
-    mockGatewayClose,
-    mockGatewayOn,
-    mockPollCreate,
-    mockProcessModalSubmit,
-    MockAdvancedIMessageKit,
-    mockIsPollVote,
-    mockParsePollVotes,
-  };
-});
-
-vi.mock("@photon-ai/imessage-kit", () => ({
-  // biome-ignore lint/complexity/useArrowFunction: vitest 4 requires function expressions for constructor mocks
-  IMessageSDK: vi.fn(function () {
-    return {
-      startWatching: mockStartWatching,
-      stopWatching: mockStopWatching,
-      close: mockLocalClose,
-      send: mockSend,
-    };
+vi.mock("spectrum-ts", () => ({
+  Spectrum: mockSpectrum,
+  text: (t: string) => ({ __kind: "text", text: t }),
+  attachment: (data: unknown, options: unknown) => ({
+    __kind: "attachment",
+    data,
+    options,
+  }),
+  poll: (title: string, options: unknown) => ({
+    __kind: "poll",
+    title,
+    options,
   }),
 }));
 
-vi.mock("@photon-ai/advanced-imessage-kit", () => ({
-  AdvancedIMessageKit: MockAdvancedIMessageKit,
-  isPollVote: mockIsPollVote,
-  parsePollVotes: mockParsePollVotes,
+vi.mock("spectrum-ts/providers/imessage", () => ({
+  imessage: Object.assign(vi.fn(), { config: mockImessageConfig }),
 }));
 
 vi.mock("chat", async (importOriginal) => {
@@ -141,7 +54,60 @@ vi.mock("chat", async (importOriginal) => {
 import { ValidationError } from "@chat-adapter/shared";
 import { NotImplementedError } from "chat";
 import type { ModalElement } from "chat";
-import { createiMessageAdapter, iMessageAdapter } from "./index";
+import {
+  createiMessageAdapter,
+  deriveAddress,
+  iMessageAdapter,
+} from "./index";
+
+// Local-mode construction requires macOS — pin the platform to `darwin` for the
+// whole suite so it runs on any CI OS. Platform-specific tests override locally.
+const REAL_PLATFORM = Object.getOwnPropertyDescriptor(process, "platform");
+beforeAll(() => {
+  Object.defineProperty(process, "platform", {
+    value: "darwin",
+    configurable: true,
+  });
+});
+afterAll(() => {
+  if (REAL_PLATFORM) {
+    Object.defineProperty(process, "platform", REAL_PLATFORM);
+  }
+});
+
+// Every gateway listener leaves a long `waitUntil` timer + a live message pump
+// running; track them so afterEach can abort and await termination.
+const openListeners: Array<{
+  controller: AbortController;
+  promise: Promise<unknown>;
+}> = [];
+
+async function startTrackedListener(
+  adapter: iMessageAdapter,
+  durationMs = 60000
+): Promise<{
+  controller: AbortController;
+  promise: Promise<unknown>;
+  response: Response;
+  waitUntil: ReturnType<typeof vi.fn>;
+}> {
+  const controller = new AbortController();
+  let promise: Promise<unknown> = Promise.resolve();
+  const waitUntil = vi.fn((task: Promise<unknown>) => {
+    promise = task;
+  });
+  const response = await adapter.startGatewayListener(
+    { waitUntil },
+    durationMs,
+    controller.signal
+  );
+  openListeners.push({ controller, promise });
+  return { controller, promise, response, waitUntil };
+}
+
+// ---------------------------------------------------------------------------
+// Test harness
+// ---------------------------------------------------------------------------
 
 const mockLogger = {
   info: vi.fn(),
@@ -151,223 +117,385 @@ const mockLogger = {
   child: vi.fn(() => mockLogger),
 };
 
-function createMockChat() {
+type Tuple = [MockSpace, MockMessage];
+
+interface MockSpace {
+  id: string;
+  __platform: string;
+  type: "dm" | "group";
+  send: ReturnType<typeof vi.fn>;
+  getMessage: ReturnType<typeof vi.fn>;
+  startTyping: ReturnType<typeof vi.fn>;
+  stopTyping: ReturnType<typeof vi.fn>;
+  edit: ReturnType<typeof vi.fn>;
+  responding: ReturnType<typeof vi.fn>;
+  rename: ReturnType<typeof vi.fn>;
+  avatar: ReturnType<typeof vi.fn>;
+}
+
+interface MockMessage {
+  id: string;
+  space: MockSpace;
+  content: unknown;
+  sender: { id: string; __platform: string } | undefined;
+  timestamp: Date;
+  platform: string;
+  direction: "inbound" | "outbound";
+  react: ReturnType<typeof vi.fn>;
+  reply: ReturnType<typeof vi.fn>;
+  edit: ReturnType<typeof vi.fn>;
+}
+
+let mockApp: ReturnType<typeof createMockApp>["app"];
+let pushInbound: (t: Tuple) => void;
+let iteratorReturnSpy: ReturnType<typeof vi.fn>;
+let mockChat: {
+  processMessage: ReturnType<typeof vi.fn>;
+  processModalSubmit: ReturnType<typeof vi.fn>;
+};
+
+function createMockApp() {
+  const queue: Tuple[] = [];
+  let parked: ((r: IteratorResult<Tuple>) => void) | null = null;
+  let closed = false;
+  const returnSpy = vi.fn();
+
+  const done = (): IteratorResult<Tuple> => ({
+    done: true,
+    value: undefined as never,
+  });
+
+  const iterator: AsyncIterator<Tuple> = {
+    next() {
+      return new Promise<IteratorResult<Tuple>>((resolve) => {
+        if (closed) {
+          resolve(done());
+          return;
+        }
+        const item = queue.shift();
+        if (item) {
+          resolve({ done: false, value: item });
+          return;
+        }
+        parked = resolve;
+      });
+    },
+    return() {
+      closed = true;
+      returnSpy();
+      if (parked) {
+        const p = parked;
+        parked = null;
+        p(done());
+      }
+      return Promise.resolve(done());
+    },
+  };
+
+  const app = {
+    messages: { [Symbol.asyncIterator]: () => iterator },
+    stop: vi.fn(),
+    send: vi.fn(),
+    edit: vi.fn(),
+    responding: vi.fn(),
+    webhook: vi.fn(),
+  };
+
+  const push = (t: Tuple) => {
+    if (parked) {
+      const p = parked;
+      parked = null;
+      p({ done: false, value: t });
+    } else {
+      queue.push(t);
+    }
+  };
+
+  return { app, push, returnSpy };
+}
+
+function makeSpace(
+  id: string,
+  type: "dm" | "group" = "dm",
+  sendResult: unknown = { id: "sent-msg-1" }
+): MockSpace {
   return {
-    handleIncomingMessage: vi.fn(),
-    processModalSubmit: mockProcessModalSubmit,
+    id,
+    __platform: "iMessage",
+    type,
+    send: vi.fn(async () => sendResult),
+    getMessage: vi.fn(async () => undefined),
+    startTyping: vi.fn(async () => undefined),
+    stopTyping: vi.fn(async () => undefined),
+    edit: vi.fn(async () => undefined),
+    responding: vi.fn(async (fn: () => unknown) => fn()),
+    rename: vi.fn(),
+    avatar: vi.fn(),
   };
 }
 
-describe("iMessageAdapter", () => {
-  it("should have the correct name", () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    expect(adapter.name).toBe("imessage");
+function makeMessage(
+  id: string,
+  space: MockSpace,
+  content: unknown,
+  opts: {
+    direction?: "inbound" | "outbound";
+    sender?: string | null;
+    timestamp?: Date;
+  } = {}
+): MockMessage {
+  const sender =
+    opts.sender === null
+      ? undefined
+      : { id: opts.sender ?? "+1234567890", __platform: "iMessage" };
+  return {
+    id,
+    space,
+    content,
+    sender,
+    timestamp: opts.timestamp ?? new Date("2026-01-15T12:00:00Z"),
+    platform: "iMessage",
+    direction: opts.direction ?? "inbound",
+    react: vi.fn(async () => undefined),
+    reply: vi.fn(async () => undefined),
+    edit: vi.fn(async () => undefined),
+  };
+}
+
+function cloudAdapter(): iMessageAdapter {
+  return new iMessageAdapter({
+    local: false,
+    logger: mockLogger,
+    projectId: "proj",
+    projectSecret: "secret",
+  });
+}
+
+function localAdapter(): iMessageAdapter {
+  return new iMessageAdapter({ local: true, logger: mockLogger });
+}
+
+async function init(adapter: iMessageAdapter): Promise<void> {
+  await adapter.initialize(mockChat as never);
+}
+
+/**
+ * Start the gateway listener and deliver one inbound message so its Space (and
+ * Message) land in the adapter's cache — the prerequisite for the stateless,
+ * threadId-addressed methods.
+ */
+async function primeInbound(
+  adapter: iMessageAdapter,
+  opts: {
+    chatGuid: string;
+    type?: "dm" | "group";
+    content?: unknown;
+    sendResult?: unknown;
+    messageId?: string;
+  }
+): Promise<{ space: MockSpace; message: MockMessage }> {
+  const space = makeSpace(opts.chatGuid, opts.type ?? "dm", opts.sendResult);
+  const message = makeMessage(
+    opts.messageId ?? "in-msg-1",
+    space,
+    opts.content ?? { type: "text", text: "hi" }
+  );
+  await startTrackedListener(adapter);
+  pushInbound([space, message]);
+  await vi.waitFor(() => expect(mockChat.processMessage).toHaveBeenCalled());
+  return { space, message };
+}
+
+beforeEach(() => {
+  const harness = createMockApp();
+  mockApp = harness.app;
+  pushInbound = harness.push;
+  iteratorReturnSpy = harness.returnSpy;
+  mockChat = { processMessage: vi.fn(), processModalSubmit: vi.fn() };
+
+  mockSpectrum.mockReset();
+  mockSpectrum.mockResolvedValue(mockApp);
+  mockImessageConfig.mockClear();
+  for (const fn of Object.values(mockLogger)) {
+    fn.mockClear?.();
+  }
+});
+
+afterEach(async () => {
+  // Real timers first, so clearTimeout in the listener teardown targets the
+  // real (not faked) duration timer.
+  vi.useRealTimers();
+  for (const listener of openListeners) {
+    listener.controller.abort();
+  }
+  await Promise.allSettled(openListeners.map((listener) => listener.promise));
+  openListeners.length = 0;
+  vi.unstubAllEnvs();
+});
+
+// ---------------------------------------------------------------------------
+
+describe("iMessageAdapter constructor", () => {
+  it("has the correct name", () => {
+    expect(localAdapter().name).toBe("imessage");
   });
 
-  it("should store local mode config", () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
+  it("stores local mode config", () => {
+    const adapter = localAdapter();
     expect(adapter.local).toBe(true);
-    expect(adapter.serverUrl).toBeUndefined();
-    expect(adapter.apiKey).toBeUndefined();
+    expect(adapter.app).toBeNull();
   });
 
-  it("should store local mode config with optional serverUrl", () => {
-    const adapter = new iMessageAdapter({
-      local: true,
-      logger: mockLogger,
-      serverUrl: "http://localhost:1234",
-    });
-    expect(adapter.local).toBe(true);
-    expect(adapter.serverUrl).toBe("http://localhost:1234");
-  });
-
-  it("should store remote mode config", () => {
+  it("stores remote (self-host) config", () => {
     const adapter = new iMessageAdapter({
       local: false,
       logger: mockLogger,
-      serverUrl: "https://example.com",
+      serverUrl: "grpc.example.com:443",
       apiKey: "test-key",
     });
     expect(adapter.local).toBe(false);
-    expect(adapter.serverUrl).toBe("https://example.com");
+    expect(adapter.serverUrl).toBe("grpc.example.com:443");
     expect(adapter.apiKey).toBe("test-key");
   });
 
-  it("should create IMessageSDK for local mode", async () => {
-    const { IMessageSDK } = await import("@photon-ai/imessage-kit");
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    expect(IMessageSDK).toHaveBeenCalled();
-    expect(adapter.sdk).toBeDefined();
+  it("stores remote (cloud) config", () => {
+    const adapter = cloudAdapter();
+    expect(adapter.projectId).toBe("proj");
+    expect(adapter.projectSecret).toBe("secret");
   });
 
-  it("should create AdvancedIMessageKit for remote mode", async () => {
-    const { AdvancedIMessageKit } = await import(
-      "@photon-ai/advanced-imessage-kit"
-    );
-    const adapter = new iMessageAdapter({
-      local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-    expect(AdvancedIMessageKit.getInstance).toHaveBeenCalledWith({
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-    expect(adapter.sdk).toBeDefined();
-  });
-
-  it("should throw on non-macOS platform in local mode", () => {
-    const originalPlatform = process.platform;
+  it("throws on non-macOS platform in local mode", () => {
+    const original = process.platform;
     Object.defineProperty(process, "platform", { value: "linux" });
     try {
-      expect(
-        () => new iMessageAdapter({ local: true, logger: mockLogger })
-      ).toThrow("iMessage adapter local mode requires macOS");
+      expect(() => localAdapter()).toThrow(
+        "iMessage adapter local mode requires macOS"
+      );
     } finally {
-      Object.defineProperty(process, "platform", { value: originalPlatform });
+      Object.defineProperty(process, "platform", { value: original });
     }
   });
 
-  it("should allow remote mode on non-macOS platforms", () => {
-    const originalPlatform = process.platform;
+  it("allows remote mode on non-macOS platforms", () => {
+    const original = process.platform;
     Object.defineProperty(process, "platform", { value: "linux" });
     try {
-      const adapter = new iMessageAdapter({
-        local: false,
-        logger: mockLogger,
-        serverUrl: "https://example.com",
-        apiKey: "test-key",
-      });
-      expect(adapter.local).toBe(false);
+      expect(cloudAdapter().local).toBe(false);
     } finally {
-      Object.defineProperty(process, "platform", { value: originalPlatform });
+      Object.defineProperty(process, "platform", { value: original });
     }
   });
 });
 
 describe("initialize", () => {
-  it("should store chat instance and not throw", async () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    const mockChat = createMockChat();
-    await adapter.initialize(mockChat as never);
-    expect(adapter.name).toBe("imessage");
+  it("builds a Spectrum instance with local provider config", async () => {
+    await init(localAdapter());
+    expect(mockImessageConfig).toHaveBeenCalledWith({ local: true });
+    expect(mockSpectrum).toHaveBeenCalledWith({
+      providers: [{ __providerConfig: { local: true } }],
+    });
   });
 
-  it("should connect and wait for ready in remote mode", async () => {
+  it("passes cloud credentials to Spectrum", async () => {
+    await init(cloudAdapter());
+    expect(mockImessageConfig).toHaveBeenCalledWith({});
+    expect(mockSpectrum).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "proj", projectSecret: "secret" })
+    );
+  });
+
+  it("maps legacy serverUrl/apiKey to a self-host clients entry (gRPC address)", async () => {
     const adapter = new iMessageAdapter({
       local: false,
       logger: mockLogger,
       serverUrl: "https://example.com",
       apiKey: "test-key",
     });
-    const mockChat = createMockChat();
-    await adapter.initialize(mockChat as never);
-    expect(mockConnect).toHaveBeenCalled();
-    expect(mockOnce).toHaveBeenCalledWith("ready", expect.any(Function));
+    await init(adapter);
+    expect(mockImessageConfig).toHaveBeenCalledWith({
+      clients: [
+        { address: "example.com:443", token: "test-key", phone: "shared" },
+      ],
+    });
+    // No cloud creds passed.
+    expect(mockSpectrum).toHaveBeenCalledWith({
+      providers: [expect.anything()],
+    });
+  });
+
+  it("exposes the Spectrum instance as adapter.app", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    expect(adapter.app).toBe(mockApp);
   });
 });
 
-describe("encodeThreadId / decodeThreadId", () => {
-  it("should encode thread ID", () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
+describe("encodeThreadId / decodeThreadId / isDM", () => {
+  it("encodes and decodes", () => {
+    const adapter = localAdapter();
     const threadId = adapter.encodeThreadId({
       chatGuid: "iMessage;-;+1234567890",
     });
     expect(threadId).toBe("imessage:iMessage;-;+1234567890");
+    expect(adapter.decodeThreadId(threadId)).toEqual({
+      chatGuid: "iMessage;-;+1234567890",
+    });
   });
 
-  it("should decode thread ID", () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    const result = adapter.decodeThreadId("imessage:iMessage;-;+1234567890");
-    expect(result).toEqual({ chatGuid: "iMessage;-;+1234567890" });
-  });
-
-  it("should roundtrip encode/decode", () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    const original = { chatGuid: "iMessage;+;chat123456" };
-    const encoded = adapter.encodeThreadId(original);
-    const decoded = adapter.decodeThreadId(encoded);
-    expect(decoded).toEqual(original);
-  });
-
-  it("should throw on thread ID from another adapter", () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    expect(() => adapter.decodeThreadId("slack:C123:1234567890.123")).toThrow(
+  it("throws on a thread ID from another adapter", () => {
+    expect(() => localAdapter().decodeThreadId("slack:C123")).toThrow(
       "Invalid iMessage thread ID"
     );
   });
-});
 
-describe("isDM", () => {
-  it("should return true for DM thread IDs (;-; pattern)", () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    expect(adapter.isDM("imessage:iMessage;-;+1234567890")).toBe(true);
-  });
-
-  it("should return false for group thread IDs (;+; pattern)", () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    expect(adapter.isDM("imessage:iMessage;+;chat493787071395575843")).toBe(
-      false
+  it("throws on an empty chat GUID", () => {
+    expect(() => localAdapter().decodeThreadId("imessage:")).toThrow(
+      "Invalid iMessage thread ID"
     );
   });
 
-  it("should return true for SMS DMs", () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
+  it("detects DM vs group", () => {
+    const adapter = localAdapter();
+    expect(adapter.isDM("imessage:iMessage;-;+1234567890")).toBe(true);
+    expect(adapter.isDM("imessage:iMessage;+;chat493787071395575843")).toBe(
+      false
+    );
     expect(adapter.isDM("imessage:SMS;-;+1234567890")).toBe(true);
   });
 });
 
 describe("handleWebhook", () => {
-  it("should return 501 (not supported)", async () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    await adapter.initialize(createMockChat() as never);
-
-    const request = new Request("https://example.com/webhook", {
-      method: "POST",
-      body: "{}",
-    });
-
-    const response = await adapter.handleWebhook(request);
+  it("returns 501 (use startGatewayListener)", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
+    const response = await adapter.handleWebhook(
+      new Request("https://example.com/webhook", { method: "POST", body: "{}" })
+    );
     expect(response.status).toBe(501);
   });
 });
 
 describe("startGatewayListener", () => {
-  afterEach(() => {
-    mockGatewayConnect.mockReset();
-    mockGatewayClose.mockReset();
-    mockGatewayOn.mockReset();
-    mockClose.mockReset();
-  });
-
-  it("should return 500 without chat instance", async () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    const response = await adapter.startGatewayListener({
+  it("returns 500 without a chat instance", async () => {
+    const response = await localAdapter().startGatewayListener({
       waitUntil: vi.fn(),
     });
     expect(response.status).toBe(500);
-    const text = await response.text();
-    expect(text).toBe("Chat instance not initialized");
+    expect(await response.text()).toBe("Chat instance not initialized");
   });
 
-  it("should return 500 without waitUntil", async () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    await adapter.initialize(createMockChat() as never);
-
+  it("returns 500 without waitUntil", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
     const response = await adapter.startGatewayListener({});
     expect(response.status).toBe(500);
-    const text = await response.text();
-    expect(text).toBe("waitUntil not provided");
+    expect(await response.text()).toBe("waitUntil not provided");
   });
 
-  it("should start listening and return success response", async () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    await adapter.initialize(createMockChat() as never);
-
-    const waitUntil = vi.fn();
-    const response = await adapter.startGatewayListener({ waitUntil }, 5000);
-
+  it("starts listening and returns a success response", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
+    const { response, waitUntil } = await startTrackedListener(adapter, 5000);
     expect(response.status).toBe(200);
     const body = (await response.json()) as Record<string, unknown>;
     expect(body.status).toBe("listening");
@@ -376,188 +504,109 @@ describe("startGatewayListener", () => {
     expect(waitUntil).toHaveBeenCalledOnce();
   });
 
-  it("should use abort signal to stop early", async () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    await adapter.initialize(createMockChat() as never);
-
-    const controller = new AbortController();
-    const waitUntil = vi.fn();
-
-    await adapter.startGatewayListener({ waitUntil }, 60000, controller.signal);
-
-    expect(waitUntil).toHaveBeenCalledOnce();
-    const listenerPromise = waitUntil.mock.calls[0][0] as Promise<void>;
-
-    controller.abort();
-
-    await listenerPromise;
-    expect(mockStopWatching).toHaveBeenCalled();
+  it("routes inbound messages to chat.processMessage", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+    expect(mockChat.processMessage).toHaveBeenCalledWith(
+      adapter,
+      "imessage:iMessage;-;+1234567890",
+      expect.objectContaining({ text: "hi" }),
+      expect.anything()
+    );
   });
 
-  it("should create a dedicated SDK instance in remote mode and close only that", async () => {
-    const adapter = new iMessageAdapter({
-      local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-    await adapter.initialize(createMockChat() as never);
-
-    const controller = new AbortController();
-    const waitUntil = vi.fn();
-
-    const callCountBefore = MockAdvancedIMessageKit.mock.calls.length;
-
-    await adapter.startGatewayListener({ waitUntil }, 60000, controller.signal);
-
-    expect(MockAdvancedIMessageKit.mock.calls.length).toBe(callCountBefore + 1);
-    expect(MockAdvancedIMessageKit).toHaveBeenLastCalledWith({
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-
-    expect(mockGatewayConnect).toHaveBeenCalled();
-    expect(mockGatewayOn).toHaveBeenCalledWith(
-      "new-message",
-      expect.any(Function)
-    );
+  it("closes the message stream on abort", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { controller, promise } = await startTrackedListener(adapter);
 
     controller.abort();
-    const listenerPromise = waitUntil.mock.calls[0][0] as Promise<void>;
-    await listenerPromise;
+    await promise;
 
-    expect(mockGatewayClose).toHaveBeenCalled();
-    expect(mockClose).not.toHaveBeenCalled();
+    expect(iteratorReturnSpy).toHaveBeenCalled();
+  });
+
+  it("ignores the sender's own (outbound) messages", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const space = makeSpace("iMessage;-;+1234567890");
+    await startTrackedListener(adapter);
+
+    pushInbound([
+      space,
+      makeMessage("out-1", space, { type: "text", text: "mine" }, {
+        direction: "outbound",
+      }),
+    ]);
+    pushInbound([
+      space,
+      makeMessage("in-2", space, { type: "text", text: "theirs" }),
+    ]);
+
+    await vi.waitFor(() => expect(mockChat.processMessage).toHaveBeenCalled());
+    expect(mockChat.processMessage).toHaveBeenCalledTimes(1);
+    expect(mockChat.processMessage).toHaveBeenCalledWith(
+      adapter,
+      expect.any(String),
+      expect.objectContaining({ text: "theirs" }),
+      expect.anything()
+    );
   });
 });
 
 describe("postMessage", () => {
-  afterEach(() => {
-    mockSend.mockReset();
-    mockSendMessage.mockReset();
-  });
-
-  it("should send via local SDK with DM chatGuid", async () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    await adapter.initialize(createMockChat() as never);
-
-    mockSend.mockResolvedValue({
-      sentAt: new Date(),
-      message: { guid: "sent-msg-001" },
-    });
-
-    const result = await adapter.postMessage(
-      "imessage:iMessage;-;+1234567890",
-      "Hello!"
-    );
-
-    expect(mockSend).toHaveBeenCalledWith("+1234567890", "Hello!");
-    expect(result.id).toBe("sent-msg-001");
-    expect(result.threadId).toBe("imessage:iMessage;-;+1234567890");
-    expect(result.raw).toEqual({
-      sentAt: expect.any(Date),
-      message: { guid: "sent-msg-001" },
-    });
-  });
-
-  it("should send via local SDK with group chatGuid", async () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    await adapter.initialize(createMockChat() as never);
-
-    mockSend.mockResolvedValue({
-      sentAt: new Date(),
-      message: { guid: "sent-msg-002" },
-    });
-
-    const result = await adapter.postMessage(
-      "imessage:iMessage;+;chat493787071395575843",
-      "Hello group!"
-    );
-
-    expect(mockSend).toHaveBeenCalledWith(
-      "chat493787071395575843",
-      "Hello group!"
-    );
-    expect(result.id).toBe("sent-msg-002");
-  });
-
-  it("should fallback to generated ID when local SDK has no message guid", async () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    await adapter.initialize(createMockChat() as never);
-
-    mockSend.mockResolvedValue({ sentAt: new Date() });
-
-    const result = await adapter.postMessage(
-      "imessage:iMessage;-;+1234567890",
-      "Hi"
-    );
-
-    expect(result.id).toMatch(LOCAL_ID_PATTERN);
-  });
-
-  it("should send via remote SDK", async () => {
-    const adapter = new iMessageAdapter({
-      local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-    await adapter.initialize(createMockChat() as never);
-
-    mockSendMessage.mockResolvedValue({
-      guid: "remote-msg-001",
-      text: "Hello!",
-    });
-
-    const result = await adapter.postMessage(
-      "imessage:iMessage;-;+1234567890",
-      "Hello!"
-    );
-
-    expect(mockSendMessage).toHaveBeenCalledWith({
+  it("sends text via the cached Space", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
       chatGuid: "iMessage;-;+1234567890",
-      message: "Hello!",
+      sendResult: { id: "remote-msg-001" },
     });
+
+    const result = await adapter.postMessage(
+      "imessage:iMessage;-;+1234567890",
+      "Hello!"
+    );
+
+    expect(space.send).toHaveBeenCalledWith({ __kind: "text", text: "Hello!" });
     expect(result.id).toBe("remote-msg-001");
     expect(result.threadId).toBe("imessage:iMessage;-;+1234567890");
-    expect(result.raw).toEqual({
-      guid: "remote-msg-001",
-      text: "Hello!",
-    });
+  });
+
+  it("throws NotImplementedError for a thread not seen this session", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await expect(
+      adapter.postMessage("imessage:iMessage;-;+1999999999", "Hi")
+    ).rejects.toThrow(NotImplementedError);
+  });
+
+  it("throws when there is nothing to send (empty text, no files)", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+    await expect(
+      adapter.postMessage("imessage:iMessage;-;+1234567890", "")
+    ).rejects.toThrow("postMessage requires non-empty text");
   });
 });
 
 describe("editMessage", () => {
-  afterEach(() => {
-    mockEditMessage.mockReset();
-  });
-
-  it("should throw NotImplementedError in local mode", async () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    await adapter.initialize(createMockChat() as never);
-
+  it("throws NotImplementedError in local mode", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
     await expect(
-      adapter.editMessage(
-        "imessage:iMessage;-;+1234567890",
-        "msg-guid-001",
-        "Updated text"
-      )
+      adapter.editMessage("imessage:iMessage;-;+1234567890", "m1", "x")
     ).rejects.toThrow("editMessage is not supported in local mode");
   });
 
-  it("should edit via remote SDK", async () => {
-    const adapter = new iMessageAdapter({
-      local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-    await adapter.initialize(createMockChat() as never);
-
-    mockEditMessage.mockResolvedValue({
-      guid: "msg-guid-001",
-      text: "Updated text",
-      dateEdited: 1234567890,
+  it("edits a cached message via spectrum-ts", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { message } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      messageId: "msg-guid-001",
     });
 
     const result = await adapter.editMessage(
@@ -566,315 +615,124 @@ describe("editMessage", () => {
       "Updated text"
     );
 
-    expect(mockEditMessage).toHaveBeenCalledWith({
-      messageGuid: "msg-guid-001",
-      editedMessage: "Updated text",
-      backwardsCompatibilityMessage: "Updated text",
+    expect(message.edit).toHaveBeenCalledWith({
+      __kind: "text",
+      text: "Updated text",
     });
     expect(result.id).toBe("msg-guid-001");
-    expect(result.threadId).toBe("imessage:iMessage;-;+1234567890");
-    expect(result.raw).toEqual({
-      guid: "msg-guid-001",
-      text: "Updated text",
-      dateEdited: 1234567890,
-    });
+  });
+
+  it("throws NotImplementedError when the message was not seen this session", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await expect(
+      adapter.editMessage("imessage:iMessage;-;+1234567890", "unknown", "x")
+    ).rejects.toThrow(NotImplementedError);
   });
 });
 
 describe("addReaction / removeReaction", () => {
-  afterEach(() => {
-    mockSendReaction.mockReset();
-  });
-
-  it("should throw NotImplementedError in local mode for addReaction", async () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    await adapter.initialize(createMockChat() as never);
-
+  it("throws NotImplementedError in local mode for addReaction", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
     await expect(
-      adapter.addReaction("imessage:iMessage;-;+1234567890", "msg-001", "heart")
+      adapter.addReaction("imessage:iMessage;-;+1234567890", "m1", "heart")
     ).rejects.toThrow("addReaction is not supported in local mode");
   });
 
-  it("should throw NotImplementedError in local mode for removeReaction", async () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    await adapter.initialize(createMockChat() as never);
-
-    await expect(
-      adapter.removeReaction(
-        "imessage:iMessage;-;+1234567890",
-        "msg-001",
-        "heart"
-      )
-    ).rejects.toThrow("removeReaction is not supported in local mode");
-  });
-
-  it("should send tapback via remote SDK for addReaction", async () => {
-    const adapter = new iMessageAdapter({
-      local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-    await adapter.initialize(createMockChat() as never);
-
-    mockSendReaction.mockResolvedValue({ guid: "reaction-001" });
-
-    await adapter.addReaction(
-      "imessage:iMessage;-;+1234567890",
-      "msg-001",
-      "heart"
-    );
-
-    expect(mockSendReaction).toHaveBeenCalledWith({
+  it("reacts with the mapped emoji glyph", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { message } = await primeInbound(adapter, {
       chatGuid: "iMessage;-;+1234567890",
-      messageGuid: "msg-001",
-      reaction: "love",
+      messageId: "msg-001",
     });
-  });
-
-  it("should map thumbs_up to like tapback", async () => {
-    const adapter = new iMessageAdapter({
-      local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-    await adapter.initialize(createMockChat() as never);
-
-    mockSendReaction.mockResolvedValue({ guid: "reaction-002" });
 
     await adapter.addReaction(
       "imessage:iMessage;-;+1234567890",
       "msg-001",
       "thumbs_up"
     );
-
-    expect(mockSendReaction).toHaveBeenCalledWith({
-      chatGuid: "iMessage;-;+1234567890",
-      messageGuid: "msg-001",
-      reaction: "like",
-    });
+    expect(message.react).toHaveBeenCalledWith("👍");
   });
 
-  it("should send remove tapback with dash prefix for removeReaction", async () => {
-    const adapter = new iMessageAdapter({
-      local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-    await adapter.initialize(createMockChat() as never);
-
-    mockSendReaction.mockResolvedValue({ guid: "reaction-003" });
-
-    await adapter.removeReaction(
-      "imessage:iMessage;-;+1234567890",
-      "msg-001",
-      "laugh"
-    );
-
-    expect(mockSendReaction).toHaveBeenCalledWith({
+  it("throws for an unsupported emoji", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, {
       chatGuid: "iMessage;-;+1234567890",
-      messageGuid: "msg-001",
-      reaction: "-laugh",
+      messageId: "msg-001",
     });
-  });
-
-  it("should throw for unsupported emoji", async () => {
-    const adapter = new iMessageAdapter({
-      local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-    await adapter.initialize(createMockChat() as never);
-
     await expect(
       adapter.addReaction("imessage:iMessage;-;+1234567890", "msg-001", "fire")
     ).rejects.toThrow('Unsupported iMessage tapback: "fire"');
   });
+
+  it("removeReaction always throws NotImplementedError", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await expect(
+      adapter.removeReaction("imessage:iMessage;-;+1234567890", "m1", "laugh")
+    ).rejects.toThrow(NotImplementedError);
+  });
 });
 
 describe("startTyping", () => {
-  afterEach(() => {
-    mockStartTyping.mockReset();
-    mockStopTyping.mockReset();
-  });
-
-  it("should throw NotImplementedError in local mode", async () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    await adapter.initialize(createMockChat() as never);
-
+  it("throws NotImplementedError in local mode", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
     await expect(
       adapter.startTyping("imessage:iMessage;-;+1234567890")
     ).rejects.toThrow("startTyping is not supported in local mode");
   });
 
-  it("should call startTyping via remote SDK", async () => {
-    vi.useFakeTimers();
-    const adapter = new iMessageAdapter({
-      local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
+  it("starts typing and auto-stops after 3s", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
     });
-    await adapter.initialize(createMockChat() as never);
 
-    mockStartTyping.mockResolvedValue(undefined);
-    mockStopTyping.mockResolvedValue(undefined);
-
+    vi.useFakeTimers();
     await adapter.startTyping("imessage:iMessage;-;+1234567890");
-
-    expect(mockStartTyping).toHaveBeenCalledWith("iMessage;-;+1234567890");
-    expect(mockStopTyping).not.toHaveBeenCalled();
+    expect(space.startTyping).toHaveBeenCalled();
+    expect(space.stopTyping).not.toHaveBeenCalled();
 
     vi.advanceTimersByTime(3000);
-
-    expect(mockStopTyping).toHaveBeenCalledWith("iMessage;-;+1234567890");
-    vi.useRealTimers();
+    expect(space.stopTyping).toHaveBeenCalled();
   });
 });
 
-describe("fetchThread", () => {
-  afterEach(() => {
-    mockGetChat.mockReset();
+describe("fetchMessages / fetchThread", () => {
+  it("fetchMessages throws NotImplementedError", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await expect(
+      adapter.fetchMessages("imessage:iMessage;-;+1234567890")
+    ).rejects.toThrow(NotImplementedError);
   });
 
-  it("should throw NotImplementedError in local mode", async () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    await adapter.initialize(createMockChat() as never);
-
+  it("fetchThread throws NotImplementedError", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
     await expect(
       adapter.fetchThread("imessage:iMessage;-;+1234567890")
-    ).rejects.toThrow("fetchThread is not supported in local mode");
-  });
-
-  it("should fetch DM thread via remote SDK", async () => {
-    const adapter = new iMessageAdapter({
-      local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-    await adapter.initialize(createMockChat() as never);
-
-    mockGetChat.mockResolvedValue({
-      originalROWID: 1,
-      guid: "iMessage;-;+1234567890",
-      style: 43,
-      chatIdentifier: "+1234567890",
-      isArchived: false,
-      displayName: "",
-      participants: [{ address: "+1234567890" }],
-    });
-
-    const result = await adapter.fetchThread("imessage:iMessage;-;+1234567890");
-
-    expect(mockGetChat).toHaveBeenCalledWith("iMessage;-;+1234567890");
-    expect(result.id).toBe("imessage:iMessage;-;+1234567890");
-    expect(result.channelId).toBe("iMessage;-;+1234567890");
-    expect(result.isDM).toBe(true);
-    expect(result.channelName).toBeUndefined();
-    expect(result.metadata.chatIdentifier).toBe("+1234567890");
-  });
-
-  it("should fetch group thread via remote SDK", async () => {
-    const adapter = new iMessageAdapter({
-      local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-    await adapter.initialize(createMockChat() as never);
-
-    mockGetChat.mockResolvedValue({
-      originalROWID: 2,
-      guid: "iMessage;+;chat493787071395575843",
-      style: 45,
-      chatIdentifier: "chat493787071395575843",
-      isArchived: false,
-      displayName: "Family Group",
-      participants: [{ address: "+1234567890" }, { address: "+1987654321" }],
-    });
-
-    const result = await adapter.fetchThread(
-      "imessage:iMessage;+;chat493787071395575843"
-    );
-
-    expect(result.isDM).toBe(false);
-    expect(result.channelName).toBe("Family Group");
-    expect(result.metadata.style).toBe(45);
+    ).rejects.toThrow(NotImplementedError);
   });
 });
 
 describe("parseMessage", () => {
-  it("should parse local imessage-kit Message when local is true", () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    adapter.initialize(createMockChat() as never);
+  it("builds a Chat SDK message from a spectrum message", () => {
+    const adapter = cloudAdapter();
+    const space = makeSpace("iMessage;-;+1987654321");
+    const raw = makeMessage(
+      "msg-remote-001",
+      space,
+      { type: "text", text: "Hello from remote" },
+      { sender: "+1987654321" }
+    );
 
-    const localRaw = {
-      id: "123",
-      guid: "msg-local-001",
-      text: "Hello from local",
-      sender: "+1234567890",
-      senderName: "Alice",
-      chatId: "iMessage;-;+1234567890",
-      isGroupChat: false,
-      service: "iMessage",
-      isRead: true,
-      isFromMe: false,
-      isReaction: false,
-      reactionType: null,
-      isReactionRemoval: false,
-      associatedMessageGuid: null,
-      attachments: [],
-      date: new Date("2026-01-15T12:00:00Z"),
-    };
-
-    const message = adapter.parseMessage(localRaw);
-    expect(message.id).toBe("msg-local-001");
-    expect(message.text).toBe("Hello from local");
-    expect(message.author.userId).toBe("+1234567890");
-    expect(message.author.userName).toBe("Alice");
-    expect(message.threadId).toBe("imessage:iMessage;-;+1234567890");
-    expect(message.isMention).toBe(true);
-  });
-
-  it("should parse remote advanced-imessage-kit MessageResponse when local is false", () => {
-    const adapter = new iMessageAdapter({
-      local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-    adapter.initialize(createMockChat() as never);
-
-    const remoteRaw = {
-      originalROWID: 1,
-      guid: "msg-remote-001",
-      text: "Hello from remote",
-      handleId: 1,
-      otherHandle: 0,
-      handle: { address: "+1987654321" },
-      chats: [{ guid: "iMessage;-;+1987654321", style: 43 }],
-      subject: "",
-      error: 0,
-      dateCreated: new Date("2026-01-15T12:00:00Z").getTime(),
-      dateRead: null,
-      dateDelivered: null,
-      isFromMe: false,
-      isArchived: false,
-      itemType: 0,
-      groupTitle: null,
-      groupActionType: 0,
-      balloonBundleId: null,
-      associatedMessageGuid: null,
-      associatedMessageType: null,
-      expressiveSendStyleId: null,
-      attachments: [],
-    };
-
-    const message = adapter.parseMessage(remoteRaw);
+    const message = adapter.parseMessage(raw);
     expect(message.id).toBe("msg-remote-001");
     expect(message.text).toBe("Hello from remote");
     expect(message.author.userId).toBe("+1987654321");
@@ -882,174 +740,34 @@ describe("parseMessage", () => {
     expect(message.isMention).toBe(true);
   });
 
-  it("should set isMention to false for group chats in local mode", () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    adapter.initialize(createMockChat() as never);
-
-    const localRaw = {
-      id: "123",
-      guid: "msg-local-002",
-      text: "Group message",
-      sender: "+1234567890",
-      senderName: null,
-      chatId: "iMessage;+;chat123456",
-      isGroupChat: true,
-      service: "iMessage",
-      isRead: true,
-      isFromMe: false,
-      isReaction: false,
-      reactionType: null,
-      isReactionRemoval: false,
-      associatedMessageGuid: null,
-      attachments: [],
-      date: new Date("2026-01-15T12:00:00Z"),
-    };
-
-    const message = adapter.parseMessage(localRaw);
-    expect(message.isMention).toBe(false);
-    expect(message.author.userName).toBe("+1234567890");
-  });
-
-  it("should handle attachments from remote payload", () => {
-    const adapter = new iMessageAdapter({
-      local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-    adapter.initialize(createMockChat() as never);
-
-    const remoteRaw = {
-      originalROWID: 2,
-      guid: "msg-remote-002",
-      text: "Photo",
-      handleId: 1,
-      otherHandle: 0,
-      handle: { address: "+1987654321" },
-      chats: [{ guid: "iMessage;-;+1987654321", style: 43 }],
-      subject: "",
-      error: 0,
-      dateCreated: Date.now(),
-      dateRead: null,
-      dateDelivered: null,
-      isFromMe: false,
-      isArchived: false,
-      itemType: 0,
-      groupTitle: null,
-      groupActionType: 0,
-      balloonBundleId: null,
-      associatedMessageGuid: null,
-      associatedMessageType: null,
-      expressiveSendStyleId: null,
-      attachments: [
+  it("sets isMention false for group chats and surfaces attachments", () => {
+    const adapter = cloudAdapter();
+    const space = makeSpace("iMessage;+;chat123456", "group");
+    const raw = makeMessage("msg-002", space, {
+      type: "group",
+      items: [
+        { content: { type: "text", text: "Photo" } },
         {
-          guid: "att-001",
-          transferName: "photo.jpg",
-          mimeType: "image/jpeg",
-          totalBytes: 54321,
+          content: {
+            type: "attachment",
+            name: "photo.jpg",
+            mimeType: "image/jpeg",
+            size: 54321,
+          },
         },
       ],
-    };
+    });
 
-    const message = adapter.parseMessage(remoteRaw);
+    const message = adapter.parseMessage(raw);
+    expect(message.isMention).toBe(false);
+    expect(message.text).toBe("Photo");
     expect(message.attachments).toHaveLength(1);
     expect(message.attachments[0].type).toBe("image");
     expect(message.attachments[0].name).toBe("photo.jpg");
-    expect(message.attachments[0].mimeType).toBe("image/jpeg");
-  });
-});
-
-describe("createiMessageAdapter", () => {
-  afterEach(() => {
-    vi.unstubAllEnvs();
-  });
-
-  it("should default to local mode", () => {
-    const adapter = createiMessageAdapter();
-    expect(adapter.local).toBe(true);
-  });
-
-  it("should use remote mode when local is false", () => {
-    const adapter = createiMessageAdapter({
-      local: false,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-    expect(adapter.local).toBe(false);
-    expect(adapter.serverUrl).toBe("https://example.com");
-    expect(adapter.apiKey).toBe("test-key");
-  });
-
-  it("should read IMESSAGE_LOCAL env var", () => {
-    vi.stubEnv("IMESSAGE_LOCAL", "false");
-    vi.stubEnv("IMESSAGE_SERVER_URL", "https://env.example.com");
-    vi.stubEnv("IMESSAGE_API_KEY", "env-key");
-
-    const adapter = createiMessageAdapter();
-    expect(adapter.local).toBe(false);
-    expect(adapter.serverUrl).toBe("https://env.example.com");
-    expect(adapter.apiKey).toBe("env-key");
-  });
-
-  it("should throw ValidationError when remote mode is missing serverUrl", () => {
-    expect(() => createiMessageAdapter({ local: false })).toThrow(
-      ValidationError
-    );
-    expect(() => createiMessageAdapter({ local: false })).toThrow(
-      "serverUrl is required when local is false"
-    );
-  });
-
-  it("should throw ValidationError when remote mode is missing apiKey", () => {
-    expect(() =>
-      createiMessageAdapter({
-        local: false,
-        serverUrl: "https://example.com",
-      })
-    ).toThrow(ValidationError);
-    expect(() =>
-      createiMessageAdapter({
-        local: false,
-        serverUrl: "https://example.com",
-      })
-    ).toThrow("apiKey is required when local is false");
-  });
-
-  it("should prefer config values over env vars", () => {
-    vi.stubEnv("IMESSAGE_SERVER_URL", "https://env.example.com");
-    vi.stubEnv("IMESSAGE_API_KEY", "env-key");
-
-    const adapter = createiMessageAdapter({
-      local: false,
-      serverUrl: "https://config.example.com",
-      apiKey: "config-key",
-    });
-    expect(adapter.serverUrl).toBe("https://config.example.com");
-    expect(adapter.apiKey).toBe("config-key");
-  });
-
-  it("should read IMESSAGE_SERVER_URL and IMESSAGE_API_KEY for local mode", () => {
-    vi.stubEnv("IMESSAGE_SERVER_URL", "http://localhost:5678");
-    vi.stubEnv("IMESSAGE_API_KEY", "local-key");
-
-    const adapter = createiMessageAdapter({ local: true });
-    expect(adapter.local).toBe(true);
-    expect(adapter.serverUrl).toBe("http://localhost:5678");
-    expect(adapter.apiKey).toBe("local-key");
   });
 });
 
 describe("openModal", () => {
-  afterEach(() => {
-    mockPollCreate.mockReset();
-    mockProcessModalSubmit.mockReset();
-    mockIsPollVote.mockReset();
-    mockParsePollVotes.mockReset();
-    mockGatewayOn.mockReset();
-    mockGatewayConnect.mockReset();
-    mockGatewayClose.mockReset();
-  });
-
   const sampleModal: ModalElement = {
     type: "modal",
     callbackId: "fav-color",
@@ -1059,7 +777,6 @@ describe("openModal", () => {
         type: "select",
         id: "color",
         label: "Pick a color",
-        placeholder: "Choose...",
         options: [
           { label: "Red", value: "red" },
           { label: "Blue", value: "blue" },
@@ -1069,18 +786,34 @@ describe("openModal", () => {
     ],
   };
 
-  it("should create iMessage poll from modal with Select child", async () => {
-    const adapter = new iMessageAdapter({
-      local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-    await adapter.initialize(createMockChat() as never);
+  it("throws NotImplementedError in local mode", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
+    await expect(
+      adapter.openModal("imessage:iMessage;-;+1234567890", sampleModal)
+    ).rejects.toThrow("openModal is not supported in local mode");
+  });
 
-    mockPollCreate.mockResolvedValue({
-      guid: "poll-001",
-      text: "Poll created",
+  it("throws ValidationError when no Select child is present", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+    await expect(
+      adapter.openModal("imessage:iMessage;-;+1234567890", {
+        type: "modal",
+        callbackId: "no-select",
+        title: "No select",
+        children: [{ type: "text_input", id: "name", label: "Name" }],
+      } as ModalElement)
+    ).rejects.toThrow("openModal requires at least one Select child");
+  });
+
+  it("creates an iMessage poll from the modal", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      sendResult: { id: "poll-001" },
     });
 
     const result = await adapter.openModal(
@@ -1088,259 +821,269 @@ describe("openModal", () => {
       sampleModal
     );
 
-    expect(mockPollCreate).toHaveBeenCalledWith({
-      chatGuid: "iMessage;-;+1234567890",
+    expect(space.send).toHaveBeenCalledWith({
+      __kind: "poll",
       title: "Favorite color?",
       options: ["Red", "Blue", "Green"],
     });
     expect(result.viewId).toBe("poll-001");
   });
+});
 
-  it("should throw NotImplementedError in local mode", async () => {
-    const adapter = new iMessageAdapter({ local: true, logger: mockLogger });
-    await adapter.initialize(createMockChat() as never);
+describe("poll vote -> processModalSubmit", () => {
+  const surveyModal: ModalElement = {
+    type: "modal",
+    callbackId: "survey",
+    title: "Survey",
+    privateMetadata: "ctx-meta",
+    children: [
+      {
+        type: "select",
+        id: "answer",
+        label: "Answer",
+        options: [
+          { label: "Option A", value: "a" },
+          { label: "Option B", value: "b" },
+          { label: "Option C", value: "c" },
+        ],
+      },
+    ],
+  };
 
-    await expect(
-      adapter.openModal("imessage:iMessage;-;+1234567890", sampleModal)
-    ).rejects.toThrow(NotImplementedError);
-    await expect(
-      adapter.openModal("imessage:iMessage;-;+1234567890", sampleModal)
-    ).rejects.toThrow("openModal is not supported in local mode");
-  });
-
-  it("should throw ValidationError when no Select child present", async () => {
-    const adapter = new iMessageAdapter({
-      local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
+  it("maps a vote's option to its SelectOption value", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      sendResult: { id: "poll-map-001" },
     });
-    await adapter.initialize(createMockChat() as never);
-
-    const modalWithoutSelect: ModalElement = {
-      type: "modal",
-      callbackId: "no-select",
-      title: "No select",
-      children: [
-        {
-          type: "text_input",
-          id: "name",
-          label: "Name",
-        },
-      ],
-    };
-
-    await expect(
-      adapter.openModal(
-        "imessage:iMessage;-;+1234567890",
-        modalWithoutSelect
-      )
-    ).rejects.toThrow(ValidationError);
-    await expect(
-      adapter.openModal(
-        "imessage:iMessage;-;+1234567890",
-        modalWithoutSelect
-      )
-    ).rejects.toThrow("openModal requires at least one Select child");
-  });
-
-  it("should store modal-to-poll mapping with privateMetadata", async () => {
-    const adapter = new iMessageAdapter({
-      local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-    await adapter.initialize(createMockChat() as never);
-
-    mockPollCreate.mockResolvedValue({
-      guid: "poll-002",
-      text: "Poll created",
-    });
-
-    const modalWithMeta: ModalElement = {
-      ...sampleModal,
-      privateMetadata: "some-context",
-    };
 
     await adapter.openModal(
       "imessage:iMessage;-;+1234567890",
-      modalWithMeta,
+      surveyModal,
       "ctx-123"
     );
 
-    // Verify the mapping was stored by triggering a poll vote
-    mockIsPollVote.mockReturnValueOnce(true);
-    mockParsePollVotes.mockReturnValueOnce({
-      votes: [
+    pushInbound([
+      space,
+      makeMessage(
+        "vote-1",
+        space,
         {
-          voteOptionIdentifier: "0",
-          participantHandle: "+1999999999",
+          type: "poll_option",
+          selected: true,
+          poll: { title: "Survey", options: [] },
+          option: { title: "Option C" },
         },
-      ],
-    });
+        { sender: "+1555555555" }
+      ),
+    ]);
 
-    // Simulate a poll vote through the gateway listener
-    const waitUntil = vi.fn();
-    const controller = new AbortController();
-    await adapter.startGatewayListener({ waitUntil }, 60000, controller.signal);
-
-    // Get the message handler
-    const onMessageCall = mockGatewayOn.mock.calls.find(
-      (c: unknown[]) => c[0] === "new-message"
+    await vi.waitFor(() =>
+      expect(mockChat.processModalSubmit).toHaveBeenCalled()
     );
-    expect(onMessageCall).toBeDefined();
+    expect(mockChat.processModalSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callbackId: "survey",
+        privateMetadata: "ctx-meta",
+        viewId: "poll-map-001",
+        values: { answer: "c" },
+        user: expect.objectContaining({ userId: "+1555555555" }),
+      }),
+      "ctx-123",
+      expect.anything()
+    );
+  });
 
-    const messageHandler = onMessageCall![1] as (msg: unknown) => void;
-
-    // Simulate a vote message
-    messageHandler({
-      guid: "vote-msg-001",
-      isFromMe: false,
-      associatedMessageGuid: "poll-002",
-      chats: [{ guid: "iMessage;-;+1234567890" }],
+  it("ignores votes for unknown polls", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
     });
 
-    // Allow async processing
-    await vi.waitFor(() => {
-      expect(mockProcessModalSubmit).toHaveBeenCalledWith(
-        expect.objectContaining({
-          callbackId: "fav-color",
-          privateMetadata: "some-context",
-          viewId: "poll-002",
-          values: { color: "red" },
-          user: expect.objectContaining({
-            userId: "+1999999999",
-          }),
-        }),
-        "ctx-123",
-        expect.anything()
-      );
-    });
+    pushInbound([
+      space,
+      makeMessage("vote-x", space, {
+        type: "poll_option",
+        selected: true,
+        poll: { title: "Unknown poll", options: [] },
+        option: { title: "Whatever" },
+      }),
+    ]);
+    // A trailing text message; once it is processed (FIFO), the vote ahead of
+    // it has already been handled — so a missing submit is conclusive.
+    pushInbound([
+      space,
+      makeMessage("after-vote", space, { type: "text", text: "after" }),
+    ]);
+    await vi.waitFor(() =>
+      expect(mockChat.processMessage).toHaveBeenCalledTimes(2)
+    );
+    expect(mockChat.processModalSubmit).not.toHaveBeenCalled();
+  });
 
-    controller.abort();
-    const listenerPromise = waitUntil.mock.calls[0][0] as Promise<void>;
-    await listenerPromise;
+  it("ignores votes for an option label that is not registered", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      sendResult: { id: "poll-bad-opt" },
+    });
+    await adapter.openModal(
+      "imessage:iMessage;-;+1234567890",
+      surveyModal,
+      "ctx-123"
+    );
+
+    pushInbound([
+      space,
+      makeMessage("vote-bad", space, {
+        type: "poll_option",
+        selected: true,
+        poll: { title: "Survey", options: [] },
+        option: { title: "Not A Real Option" },
+      }),
+    ]);
+    pushInbound([
+      space,
+      makeMessage("after-bad", space, { type: "text", text: "after" }),
+    ]);
+    await vi.waitFor(() =>
+      expect(mockChat.processMessage).toHaveBeenCalledTimes(2)
+    );
+    expect(mockChat.processModalSubmit).not.toHaveBeenCalled();
   });
 });
 
-describe("poll vote to modal submit routing", () => {
-  afterEach(() => {
-    mockPollCreate.mockReset();
-    mockProcessModalSubmit.mockReset();
-    mockIsPollVote.mockReset();
-    mockParsePollVotes.mockReset();
-    mockGatewayOn.mockReset();
-    mockGatewayConnect.mockReset();
-    mockGatewayClose.mockReset();
+describe("deriveAddress", () => {
+  it("strips scheme and defaults the port to 443", () => {
+    expect(deriveAddress("https://example.com")).toBe("example.com:443");
+    expect(deriveAddress("http://example.com/path")).toBe("example.com:443");
+    expect(deriveAddress("example.com:8443")).toBe("example.com:8443");
+    expect(deriveAddress("grpc.example.com:443")).toBe("grpc.example.com:443");
   });
 
-  it("should ignore votes for unknown polls", async () => {
-    const adapter = new iMessageAdapter({
-      local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
-      apiKey: "test-key",
-    });
-    await adapter.initialize(createMockChat() as never);
+  it("handles bracketed IPv6 addresses", () => {
+    expect(deriveAddress("https://[2001:db8::1]")).toBe("[2001:db8::1]:443");
+    expect(deriveAddress("[2001:db8::1]:8443")).toBe("[2001:db8::1]:8443");
+  });
+});
 
-    const waitUntil = vi.fn();
-    const controller = new AbortController();
-    await adapter.startGatewayListener({ waitUntil }, 60000, controller.signal);
-
-    const onMessageCall = mockGatewayOn.mock.calls.find(
-      (c: unknown[]) => c[0] === "new-message"
-    );
-    const messageHandler = onMessageCall![1] as (msg: unknown) => void;
-
-    mockIsPollVote.mockReturnValueOnce(true);
-
-    messageHandler({
-      guid: "vote-msg-unknown",
-      isFromMe: false,
-      associatedMessageGuid: "unknown-poll",
-      chats: [{ guid: "iMessage;-;+1234567890" }],
-    });
-
-    expect(mockProcessModalSubmit).not.toHaveBeenCalled();
-
-    controller.abort();
-    const listenerPromise = waitUntil.mock.calls[0][0] as Promise<void>;
-    await listenerPromise;
+describe("createiMessageAdapter", () => {
+  beforeEach(() => {
+    // Isolate from the runner's environment so mode detection is deterministic.
+    vi.stubEnv("IMESSAGE_LOCAL", undefined);
+    vi.stubEnv("IMESSAGE_PROJECT_ID", undefined);
+    vi.stubEnv("IMESSAGE_PROJECT_SECRET", undefined);
+    vi.stubEnv("IMESSAGE_SERVER_URL", undefined);
+    vi.stubEnv("IMESSAGE_API_KEY", undefined);
+    vi.stubEnv("IMESSAGE_PHONE", undefined);
   });
 
-  it("should map option index to SelectOption value", async () => {
-    const adapter = new iMessageAdapter({
+  it("defaults to local mode", () => {
+    expect(createiMessageAdapter().local).toBe(true);
+  });
+
+  it("uses cloud credentials when provided", () => {
+    const adapter = createiMessageAdapter({
       local: false,
-      logger: mockLogger,
-      serverUrl: "https://example.com",
+      projectId: "p",
+      projectSecret: "s",
+    });
+    expect(adapter.local).toBe(false);
+    expect(adapter.projectId).toBe("p");
+  });
+
+  it("uses legacy serverUrl/apiKey self-host mode", () => {
+    const adapter = createiMessageAdapter({
+      local: false,
+      serverUrl: "grpc.example.com:443",
       apiKey: "test-key",
     });
-    await adapter.initialize(createMockChat() as never);
+    expect(adapter.serverUrl).toBe("grpc.example.com:443");
+    expect(adapter.apiKey).toBe("test-key");
+  });
 
-    // Create a poll via openModal first
-    mockPollCreate.mockResolvedValue({ guid: "poll-map-001" });
-    await adapter.openModal("imessage:iMessage;-;+1234567890", {
-      type: "modal",
-      callbackId: "survey",
-      title: "Survey",
-      children: [
-        {
-          type: "select",
-          id: "answer",
-          label: "Answer",
-          options: [
-            { label: "Option A", value: "a" },
-            { label: "Option B", value: "b" },
-            { label: "Option C", value: "c" },
-          ],
-        },
-      ],
+  it("selects remote (cloud) from credentials without an explicit local flag", () => {
+    const adapter = createiMessageAdapter({
+      projectId: "p",
+      projectSecret: "s",
     });
+    expect(adapter.local).toBe(false);
+    expect(adapter.projectId).toBe("p");
+  });
 
-    const waitUntil = vi.fn();
-    const controller = new AbortController();
-    await adapter.startGatewayListener({ waitUntil }, 60000, controller.signal);
+  it("selects remote (self-host) from serverUrl + apiKey without an explicit local flag", () => {
+    const adapter = createiMessageAdapter({
+      serverUrl: "grpc.example.com:443",
+      apiKey: "k",
+    });
+    expect(adapter.local).toBe(false);
+    expect(adapter.serverUrl).toBe("grpc.example.com:443");
+  });
 
-    const onMessageCall = mockGatewayOn.mock.calls.find(
-      (c: unknown[]) => c[0] === "new-message"
+  it("trims serverUrl and apiKey passed through to the adapter", () => {
+    const adapter = createiMessageAdapter({
+      local: false,
+      serverUrl: "  grpc.example.com:443  ",
+      apiKey: "  token  ",
+    });
+    expect(adapter.serverUrl).toBe("grpc.example.com:443");
+    expect(adapter.apiKey).toBe("token");
+  });
+
+  it("reads cloud creds from env", () => {
+    vi.stubEnv("IMESSAGE_LOCAL", "false");
+    vi.stubEnv("IMESSAGE_PROJECT_ID", "env-proj");
+    vi.stubEnv("IMESSAGE_PROJECT_SECRET", "env-secret");
+    const adapter = createiMessageAdapter();
+    expect(adapter.local).toBe(false);
+    expect(adapter.projectId).toBe("env-proj");
+  });
+
+  it("throws when remote mode has no auth at all", () => {
+    expect(() => createiMessageAdapter({ local: false })).toThrow(
+      ValidationError
     );
-    const messageHandler = onMessageCall![1] as (msg: unknown) => void;
+    expect(() => createiMessageAdapter({ local: false })).toThrow(
+      "serverUrl is required when local is false"
+    );
+  });
 
-    // Vote for option index 2 (Option C -> value "c")
-    mockIsPollVote.mockReturnValueOnce(true);
-    mockParsePollVotes.mockReturnValueOnce({
-      votes: [
-        {
-          voteOptionIdentifier: "2",
-          participantHandle: "+1555555555",
-        },
-      ],
+  it("throws when self-host serverUrl is set without apiKey", () => {
+    expect(() =>
+      createiMessageAdapter({ local: false, serverUrl: "grpc.example.com:443" })
+    ).toThrow("apiKey is required when local is false");
+  });
+
+  it("prefers config values over env vars", () => {
+    vi.stubEnv("IMESSAGE_PROJECT_ID", "env-proj");
+    vi.stubEnv("IMESSAGE_PROJECT_SECRET", "env-secret");
+    const adapter = createiMessageAdapter({
+      local: false,
+      projectId: "config-proj",
+      projectSecret: "config-secret",
     });
+    expect(adapter.projectId).toBe("config-proj");
+  });
 
-    messageHandler({
-      guid: "vote-msg-002",
-      isFromMe: false,
-      associatedMessageGuid: "poll-map-001",
-      chats: [{ guid: "iMessage;-;+1234567890" }],
-    });
+  it("treats an empty clients array as missing config", () => {
+    expect(() => createiMessageAdapter({ local: false, clients: [] })).toThrow(
+      "serverUrl is required when local is false"
+    );
+  });
 
-    await vi.waitFor(() => {
-      expect(mockProcessModalSubmit).toHaveBeenCalledWith(
-        expect.objectContaining({
-          callbackId: "survey",
-          values: { answer: "c" },
-          user: expect.objectContaining({
-            userId: "+1555555555",
-          }),
-        }),
-        undefined,
-        expect.anything()
-      );
-    });
-
-    controller.abort();
-    const listenerPromise = waitUntil.mock.calls[0][0] as Promise<void>;
-    await listenerPromise;
+  it("treats whitespace-only serverUrl/apiKey as missing", () => {
+    expect(() =>
+      createiMessageAdapter({ local: false, serverUrl: "   " })
+    ).toThrow("serverUrl is required when local is false");
+    expect(() =>
+      createiMessageAdapter({
+        local: false,
+        serverUrl: "grpc.example.com:443",
+        apiKey: "   ",
+      })
+    ).toThrow("apiKey is required when local is false");
   });
 });
