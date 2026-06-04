@@ -5,41 +5,56 @@ import type { CreateiMessageAdapterOptions } from "./config";
 
 /**
  * Construct an {@link iMessageAdapter}, filling unset options from environment
- * variables. Mode precedence: cloud (`projectId` + `projectSecret`) → self-host
- * (`clients`, or `serverUrl` + `apiKey`) → local (`IMESSAGE_LOCAL !== "false"`).
+ * variables.
+ *
+ * Mode is chosen by an explicit local signal first — `config.local`, then
+ * `IMESSAGE_LOCAL` — otherwise remote when remote credentials are present (cloud
+ * `projectId` + `projectSecret`, or self-host `clients` / `serverUrl` +
+ * `apiKey`), else local.
  */
 export function createiMessageAdapter(
   config?: CreateiMessageAdapterOptions
 ): iMessageAdapter {
-  const local = config?.local ?? process.env.IMESSAGE_LOCAL !== "false";
   const logger = config?.logger ?? new ConsoleLogger("info").child("imessage");
-
-  if (local) {
-    return new iMessageAdapter({
-      local: true,
-      logger,
-      serverUrl: config?.serverUrl ?? process.env.IMESSAGE_SERVER_URL,
-      apiKey: config?.apiKey ?? process.env.IMESSAGE_API_KEY,
-    });
-  }
 
   const projectId = config?.projectId ?? process.env.IMESSAGE_PROJECT_ID;
   const projectSecret =
     config?.projectSecret ?? process.env.IMESSAGE_PROJECT_SECRET;
   const clients = config?.clients;
-  const serverUrl = config?.serverUrl ?? process.env.IMESSAGE_SERVER_URL;
-  const apiKey = config?.apiKey ?? process.env.IMESSAGE_API_KEY;
+  // Normalize once: trim so surrounding whitespace neither passes validation
+  // nor reaches the adapter (where it would break the gRPC address/token).
+  const serverUrl = (
+    config?.serverUrl ?? process.env.IMESSAGE_SERVER_URL
+  )?.trim();
+  const apiKey = (config?.apiKey ?? process.env.IMESSAGE_API_KEY)?.trim();
   const phone = config?.phone ?? process.env.IMESSAGE_PHONE;
 
-  // Treat an empty clients array and whitespace-only credentials as missing, so
-  // we fail here with a clear message instead of downstream in initialize().
   const hasClients = Array.isArray(clients)
     ? clients.length > 0
     : Boolean(clients);
-  const hasServerUrl = Boolean(serverUrl?.trim());
-  const hasApiKey = Boolean(apiKey?.trim());
+  const hasCloud = Boolean(projectId && projectSecret);
+  const hasServerUrl = Boolean(serverUrl);
+  const hasApiKey = Boolean(apiKey);
+  const hasRemoteCreds = hasCloud || hasClients || (hasServerUrl && hasApiKey);
 
-  if (!(projectId && projectSecret) && !hasClients) {
+  // Precedence: an explicit local signal (config.local, then IMESSAGE_LOCAL)
+  // wins; otherwise choose remote when remote credentials are present.
+  let local: boolean;
+  if (config?.local !== undefined) {
+    local = config.local;
+  } else if (process.env.IMESSAGE_LOCAL === "false") {
+    local = false;
+  } else if (process.env.IMESSAGE_LOCAL !== undefined) {
+    local = true;
+  } else {
+    local = !hasRemoteCreds;
+  }
+
+  if (local) {
+    return new iMessageAdapter({ local: true, logger, serverUrl, apiKey });
+  }
+
+  if (!hasCloud && !hasClients) {
     if (!hasServerUrl) {
       throw new ValidationError(
         "imessage",

@@ -158,7 +158,7 @@ This runs every 9 minutes, ensuring overlap with the 10-minute listener duration
 
 | Option | Required | Description |
 |--------|----------|-------------|
-| `local` | No | `true` for local mode, `false` for cloud/self-host. Auto-detected from `IMESSAGE_LOCAL` (default: `true`) |
+| `local` | No | `true` for local, `false` for cloud/self-host. Defaults to local unless `local: false`, `IMESSAGE_LOCAL=false`, or remote credentials (cloud/self-host) are provided |
 | `projectId` | Cloud | Spectrum Cloud project ID. Auto-detected from `IMESSAGE_PROJECT_ID` |
 | `projectSecret` | Cloud | Spectrum Cloud project secret. Auto-detected from `IMESSAGE_PROJECT_SECRET` |
 | `serverUrl` | Self-host | gRPC `host:port` of your iMessage server. Auto-detected from `IMESSAGE_SERVER_URL` |

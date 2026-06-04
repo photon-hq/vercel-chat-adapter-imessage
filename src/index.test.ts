@@ -971,6 +971,16 @@ describe("deriveAddress", () => {
 });
 
 describe("createiMessageAdapter", () => {
+  beforeEach(() => {
+    // Isolate from the runner's environment so mode detection is deterministic.
+    vi.stubEnv("IMESSAGE_LOCAL", undefined);
+    vi.stubEnv("IMESSAGE_PROJECT_ID", undefined);
+    vi.stubEnv("IMESSAGE_PROJECT_SECRET", undefined);
+    vi.stubEnv("IMESSAGE_SERVER_URL", undefined);
+    vi.stubEnv("IMESSAGE_API_KEY", undefined);
+    vi.stubEnv("IMESSAGE_PHONE", undefined);
+  });
+
   it("defaults to local mode", () => {
     expect(createiMessageAdapter().local).toBe(true);
   });
@@ -993,6 +1003,34 @@ describe("createiMessageAdapter", () => {
     });
     expect(adapter.serverUrl).toBe("grpc.example.com:443");
     expect(adapter.apiKey).toBe("test-key");
+  });
+
+  it("selects remote (cloud) from credentials without an explicit local flag", () => {
+    const adapter = createiMessageAdapter({
+      projectId: "p",
+      projectSecret: "s",
+    });
+    expect(adapter.local).toBe(false);
+    expect(adapter.projectId).toBe("p");
+  });
+
+  it("selects remote (self-host) from serverUrl + apiKey without an explicit local flag", () => {
+    const adapter = createiMessageAdapter({
+      serverUrl: "grpc.example.com:443",
+      apiKey: "k",
+    });
+    expect(adapter.local).toBe(false);
+    expect(adapter.serverUrl).toBe("grpc.example.com:443");
+  });
+
+  it("trims serverUrl and apiKey passed through to the adapter", () => {
+    const adapter = createiMessageAdapter({
+      local: false,
+      serverUrl: "  grpc.example.com:443  ",
+      apiKey: "  token  ",
+    });
+    expect(adapter.serverUrl).toBe("grpc.example.com:443");
+    expect(adapter.apiKey).toBe("token");
   });
 
   it("reads cloud creds from env", () => {
