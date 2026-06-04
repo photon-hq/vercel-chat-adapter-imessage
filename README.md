@@ -99,9 +99,54 @@ Local mode requires running directly on a macOS machine with iMessage. It uses A
 
 ## Receiving messages
 
-Call `startGatewayListener()` to listen for new messages in real-time. The adapter consumes spectrum-ts's message stream and routes each message into your bot.
+There are two ways to receive inbound messages:
 
-In serverless environments, use a cron job to maintain the connection.
+- **Webhooks** (recommended for serverless) — Spectrum Cloud delivers each message to an HTTPS endpoint as signed JSON. No long-lived connection or cron job. Remote (cloud) mode only.
+- **Gateway listener** — `startGatewayListener()` consumes spectrum-ts's message stream in real time. Works in all modes; in serverless it needs a cron job to stay connected.
+
+## Webhooks
+
+In remote (cloud) mode, [Spectrum Cloud](https://app.photon.codes) can deliver inbound messages to your HTTPS endpoint as signed JSON — see the [webhook docs](https://photon.codes/docs/webhooks/overview). This is the simplest path for serverless: no cron, no persistent connection.
+
+### 1. Register the endpoint
+
+In the [Spectrum Cloud dashboard](https://app.photon.codes), register your endpoint URL (public HTTPS only) and copy the per-webhook **signing secret** — it is shown only once.
+
+### 2. Configure the secret
+
+Set `IMESSAGE_WEBHOOK_SECRET` to that signing secret. The adapter verifies the `X-Spectrum-Signature` HMAC on every delivery and rejects unsigned, mismatched, or stale (>5 min) requests.
+
+```bash
+IMESSAGE_WEBHOOK_SECRET=whsec_...
+```
+
+### 3. Create the webhook route
+
+```typescript
+// app/api/imessage/webhook/route.ts
+import { after } from "next/server";
+import { bot } from "@/lib/bot";
+
+export async function POST(request: Request): Promise<Response> {
+  return bot.webhooks.imessage(request, {
+    waitUntil: (task) => after(() => task),
+  });
+}
+```
+
+`bot.webhooks.imessage` calls the adapter's `handleWebhook`: it verifies the signature, parses the `messages` event, and routes the message into your bot. Processing runs in the background via `waitUntil`, so the endpoint acknowledges immediately. Spectrum Cloud retries failed deliveries with backoff and delivers at-least-once — dedupe on `X-Spectrum-Webhook-Id` + `message.id` if you need exactly-once side effects.
+
+### Replying
+
+A webhook delivery carries no live connection, but your bot can still respond: for a **DM**, the adapter rebuilds the thread from its address and sends, reacts, edits, and shows typing over spectrum-ts (gRPC) — no gateway needed.
+
+```typescript
+bot.onNewMention(async (thread, message) => {
+  await thread.post("Got it!"); // works directly from a webhook delivery (DM)
+});
+```
+
+Replying into a **group** still requires that group to have been received over the [gateway listener](#gateway-setup-for-serverless) in the same session — an unseen group can't be reconstructed from its id (see [Limitations](#limitations)).
 
 ## Gateway setup for serverless
 
@@ -165,6 +210,7 @@ This runs every 9 minutes, ensuring overlap with the 10-minute listener duration
 | `apiKey` | Self-host | Auth token for the self-hosted server. Auto-detected from `IMESSAGE_API_KEY` |
 | `clients` | No | Explicit `{ address, token, phone }[]` for multi-number self-host setups |
 | `phone` | No | Routing/identity phone for legacy self-host (defaults to `"shared"`). Auto-detected from `IMESSAGE_PHONE` |
+| `webhookSecret` | No | Per-webhook signing secret for verifying Spectrum Cloud deliveries. Required to receive [webhooks](#webhooks). Auto-detected from `IMESSAGE_WEBHOOK_SECRET` |
 | `logger` | No | Logger instance (defaults to `ConsoleLogger("info")`) |
 
 ## Environment variables
@@ -181,6 +227,9 @@ IMESSAGE_PROJECT_SECRET=...
 IMESSAGE_SERVER_URL=imessage.example.com:443   # gRPC host:port (NOT an https URL)
 IMESSAGE_API_KEY=...
 IMESSAGE_PHONE=+1234567890                      # optional, for multi-number routing
+
+# Webhooks (remote/cloud only; see "Webhooks")
+IMESSAGE_WEBHOOK_SECRET=whsec_...               # per-webhook signing secret
 ```
 
 ## Features
@@ -200,7 +249,7 @@ IMESSAGE_PHONE=+1234567890                      # optional, for multi-number rou
 | Cards | No |
 | Streaming | No |
 | Ephemeral messages | No |
-| Webhooks | No (use `startGatewayListener()`) |
+| Webhooks | Yes (remote — Spectrum Cloud delivery) |
 
 > **Remote** means cloud or self-hosted mode (anything other than `local: true`).
 
@@ -265,7 +314,7 @@ iMessage uses tapbacks instead of emoji reactions. The adapter maps standard emo
 
 ## Limitations
 
-- **Reactive only.** The adapter can send, react, edit, and show typing only within threads it has received a message from in the current session. There is no way to construct a conversation from a bare thread ID, so proactive/cold sends to a never-seen thread throw `NotImplementedError`. Responding to an incoming message (the common bot flow) works.
+- **DMs send cold; groups are session-bound.** For a **DM**, the adapter rebuilds the thread from its address via spectrum-ts (gRPC), so it can send, react, edit, and show typing even into a thread it hasn't seen this session — including a [webhook](#webhooks) delivery. A **group** chat has no by-id resolver, so addressing one requires it to have been received over the gateway/stream in the current session; cold sends to an unseen group throw `NotImplementedError`. (Local mode cannot create spaces at all — it only replies to received messages.)
 - **No message history.** `fetchMessages` is not supported — spectrum-ts exposes no paginated history API.
 - **No thread/chat info.** `fetchThread` is not supported.
 - **No reaction removal.** `removeReaction` is not supported.
@@ -281,7 +330,7 @@ This version re-platforms the adapter onto **spectrum-ts**. If you are upgrading
 - **Dependency** — replaces `@photon-ai/imessage-kit` + `@photon-ai/advanced-imessage-kit` with `spectrum-ts`.
 - **`IMESSAGE_SERVER_URL` is now a gRPC `host:port`** (self-host), not an `https://` / Socket.IO URL.
 - **New cloud path** — set `IMESSAGE_PROJECT_ID` + `IMESSAGE_PROJECT_SECRET` for Spectrum Cloud.
-- **Removed capabilities** (now `NotImplementedError`): `fetchMessages`, `fetchThread`, `removeReaction`, and proactive/cold `postMessage` to threads not seen in the current session. Local `fetchMessages` (previously supported) is also removed.
+- **Removed capabilities** (now `NotImplementedError`): `fetchMessages`, `fetchThread`, `removeReaction`, and cold `postMessage` to an unseen **group** thread (DMs are rebuilt from their address over gRPC — see [Limitations](#limitations)). Local `fetchMessages` (previously supported) is also removed.
 - **`adapter.sdk` → `adapter.app`** — the adapter now exposes the underlying `SpectrumInstance` as `adapter.app` (null until `initialize()`).
 
 ## Troubleshooting

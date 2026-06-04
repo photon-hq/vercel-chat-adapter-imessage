@@ -6,36 +6,64 @@ import type {
 } from "spectrum-ts";
 import { encodeThreadId, isDMChatGuid } from "./thread";
 
-/** Build the Chat SDK `Message` the adapter surfaces from a spectrum-ts Message. */
-export function buildChatMessage(
-  message: SpectrumMessage,
-  space: SpectrumSpace
+/**
+ * The provider-agnostic fields a Chat SDK `Message` is built from. Both the
+ * gateway (live spectrum-ts `Message`) and the webhook (plain JSON delivery)
+ * paths normalize down to this shape.
+ */
+export interface InboundMessageFields {
+  chatGuid: string;
+  content: SpectrumContent;
+  id: string;
+  isOutbound: boolean;
+  raw: unknown;
+  senderId: string;
+  timestamp: Date;
+}
+
+/** Build the Chat SDK `Message` from already-normalized inbound fields. */
+export function buildChatMessageFromFields(
+  fields: InboundMessageFields
 ): Message {
-  const chatGuid = space.id;
-  const text = extractText(message.content);
-  const sender = message.sender?.id ?? "";
+  const text = extractText(fields.content);
 
   return new Message({
-    id: message.id,
-    threadId: encodeThreadId({ chatGuid }),
+    id: fields.id,
+    threadId: encodeThreadId({ chatGuid: fields.chatGuid }),
     text,
     formatted: parseMarkdown(text),
     author: {
-      userId: sender,
-      userName: sender,
-      fullName: sender,
+      userId: fields.senderId,
+      userName: fields.senderId,
+      fullName: fields.senderId,
       isBot: false,
-      isMe: message.direction === "outbound",
+      isMe: fields.isOutbound,
     },
-    metadata: { dateSent: message.timestamp, edited: false },
-    attachments: extractAttachments(message.content).map((a) => ({
+    metadata: { dateSent: fields.timestamp, edited: false },
+    attachments: extractAttachments(fields.content).map((a) => ({
       type: getAttachmentType(a.mimeType),
       name: a.name,
       mimeType: a.mimeType,
       size: a.size ?? 0,
     })),
+    raw: fields.raw,
+    isMention: isDMChatGuid(fields.chatGuid),
+  });
+}
+
+/** Build the Chat SDK `Message` the adapter surfaces from a spectrum-ts Message. */
+export function buildChatMessage(
+  message: SpectrumMessage,
+  space: SpectrumSpace
+): Message {
+  return buildChatMessageFromFields({
+    id: message.id,
+    chatGuid: space.id,
+    content: message.content,
+    senderId: message.sender?.id ?? "",
+    isOutbound: message.direction === "outbound",
+    timestamp: message.timestamp,
     raw: message,
-    isMention: isDMChatGuid(chatGuid),
   });
 }
 

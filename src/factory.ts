@@ -73,6 +73,9 @@ export function createiMessageAdapter(
   )?.trim();
   const apiKey = (config?.apiKey ?? process.env.IMESSAGE_API_KEY)?.trim();
   const phone = config?.phone ?? process.env.IMESSAGE_PHONE;
+  const webhookSecret = (
+    config?.webhookSecret ?? process.env.IMESSAGE_WEBHOOK_SECRET
+  )?.trim();
 
   const hasClients = Array.isArray(clients)
     ? clients.length > 0
@@ -97,5 +100,6 @@ export function createiMessageAdapter(
     serverUrl,
     apiKey,
     phone,
+    webhookSecret,
   });
 }
