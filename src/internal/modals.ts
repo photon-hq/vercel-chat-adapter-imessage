@@ -21,8 +21,11 @@ export interface ResolvedVote {
  */
 export class ModalPollRegistry {
   private readonly byTitle = new Map<string, ModalPollMeta>();
+  private readonly maxEntries: number;
 
-  constructor(private readonly maxEntries = DEFAULT_MAX_MODALS) {}
+  constructor(maxEntries = DEFAULT_MAX_MODALS) {
+    this.maxEntries = maxEntries;
+  }
 
   register(chatGuid: string, title: string, meta: ModalPollMeta): void {
     const key = titleKey(chatGuid, title);
@@ -44,12 +47,12 @@ export class ModalPollRegistry {
   ): ResolvedVote | undefined {
     const meta = this.byTitle.get(titleKey(chatGuid, pollTitle));
     if (!meta) {
-      return undefined;
+      return;
     }
     const option = meta.options.find((o) => o.label === optionTitle);
     if (!option) {
       // Unknown option label — don't fabricate an unregistered submit value.
-      return undefined;
+      return;
     }
     return { meta, value: option.value };
   }

@@ -21,6 +21,8 @@
     "test": "vitest run --coverage",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
+    "check": "ultracite check",
+    "fix": "ultracite fix",
     "clean": "rm -rf dist coverage"
   },
   "peerDependencies": {
@@ -32,12 +34,14 @@
     "spectrum-ts": "^1.18.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.12",
     "@types/mime-types": "^3.0.1",
     "@types/node": "^22.10.2",
     "@vitest/coverage-v8": "^4.0.18",
     "chat": "^4.15.0",
     "tsup": "^8.3.5",
     "typescript": "^5.9.3",
+    "ultracite": "7.8.1",
     "vitest": "^4.0.18"
   },
   "packageManager": "pnpm@10.30.3",

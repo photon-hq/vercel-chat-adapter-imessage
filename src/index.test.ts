@@ -52,13 +52,9 @@ vi.mock("chat", async (importOriginal) => {
 });
 
 import { ValidationError } from "@chat-adapter/shared";
-import { NotImplementedError } from "chat";
 import type { ModalElement } from "chat";
-import {
-  createiMessageAdapter,
-  deriveAddress,
-  iMessageAdapter,
-} from "./index";
+import { NotImplementedError } from "chat";
+import { createiMessageAdapter, deriveAddress, iMessageAdapter } from "./index";
 
 // Local-mode construction requires macOS — pin the platform to `darwin` for the
 // whole suite so it runs on any CI OS. Platform-specific tests override locally.
@@ -84,7 +80,7 @@ const openListeners: Array<{
 
 async function startTrackedListener(
   adapter: iMessageAdapter,
-  durationMs = 60000
+  durationMs = 60_000
 ): Promise<{
   controller: AbortController;
   promise: Promise<unknown>;
@@ -120,30 +116,30 @@ const mockLogger = {
 type Tuple = [MockSpace, MockMessage];
 
 interface MockSpace {
-  id: string;
   __platform: string;
-  type: "dm" | "group";
-  send: ReturnType<typeof vi.fn>;
+  avatar: ReturnType<typeof vi.fn>;
+  edit: ReturnType<typeof vi.fn>;
   getMessage: ReturnType<typeof vi.fn>;
+  id: string;
+  rename: ReturnType<typeof vi.fn>;
+  responding: ReturnType<typeof vi.fn>;
+  send: ReturnType<typeof vi.fn>;
   startTyping: ReturnType<typeof vi.fn>;
   stopTyping: ReturnType<typeof vi.fn>;
-  edit: ReturnType<typeof vi.fn>;
-  responding: ReturnType<typeof vi.fn>;
-  rename: ReturnType<typeof vi.fn>;
-  avatar: ReturnType<typeof vi.fn>;
+  type: "dm" | "group";
 }
 
 interface MockMessage {
-  id: string;
-  space: MockSpace;
   content: unknown;
-  sender: { id: string; __platform: string } | undefined;
-  timestamp: Date;
-  platform: string;
   direction: "inbound" | "outbound";
+  edit: ReturnType<typeof vi.fn>;
+  id: string;
+  platform: string;
   react: ReturnType<typeof vi.fn>;
   reply: ReturnType<typeof vi.fn>;
-  edit: ReturnType<typeof vi.fn>;
+  sender: { id: string; __platform: string } | undefined;
+  space: MockSpace;
+  timestamp: Date;
 }
 
 let mockApp: ReturnType<typeof createMockApp>["app"];
@@ -302,7 +298,13 @@ async function primeInbound(
   );
   await startTrackedListener(adapter);
   pushInbound([space, message]);
-  await vi.waitFor(() => expect(mockChat.processMessage).toHaveBeenCalled());
+  // Condition-based wait (no assertion in this helper — that would be a
+  // misplaced expect); the assertions live in the test bodies.
+  await vi.waitFor(() => {
+    if (mockChat.processMessage.mock.calls.length === 0) {
+      throw new Error("inbound message was not processed");
+    }
+  });
   return { space, message };
 }
 
@@ -535,9 +537,14 @@ describe("startGatewayListener", () => {
 
     pushInbound([
       space,
-      makeMessage("out-1", space, { type: "text", text: "mine" }, {
-        direction: "outbound",
-      }),
+      makeMessage(
+        "out-1",
+        space,
+        { type: "text", text: "mine" },
+        {
+          direction: "outbound",
+        }
+      ),
     ]);
     pushInbound([
       space,
@@ -752,7 +759,7 @@ describe("parseMessage", () => {
             type: "attachment",
             name: "photo.jpg",
             mimeType: "image/jpeg",
-            size: 54321,
+            size: 54_321,
           },
         },
       ],

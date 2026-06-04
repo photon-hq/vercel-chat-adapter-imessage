@@ -15,11 +15,16 @@ const DEFAULT_MAX_MESSAGES = 1024;
 export class InboundCache {
   private readonly spaces = new Map<string, SpectrumSpace>();
   private readonly messages = new Map<string, SpectrumMessage>();
+  private readonly maxSpaces: number;
+  private readonly maxMessages: number;
 
   constructor(
-    private readonly maxSpaces = DEFAULT_MAX_SPACES,
-    private readonly maxMessages = DEFAULT_MAX_MESSAGES
-  ) {}
+    maxSpaces = DEFAULT_MAX_SPACES,
+    maxMessages = DEFAULT_MAX_MESSAGES
+  ) {
+    this.maxSpaces = maxSpaces;
+    this.maxMessages = maxMessages;
+  }
 
   /** Cache the Space + Message (and any group sub-items) from one inbound event. */
   remember(space: SpectrumSpace, message: SpectrumMessage): void {
