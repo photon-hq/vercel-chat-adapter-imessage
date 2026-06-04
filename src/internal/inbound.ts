@@ -88,9 +88,17 @@ function extractAttachments(content: SpectrumContent): ExtractedAttachment[] {
 function getAttachmentType(
   mimeType?: string
 ): "image" | "video" | "audio" | "file" {
-  if (!mimeType) return "file";
-  if (mimeType.startsWith("image/")) return "image";
-  if (mimeType.startsWith("video/")) return "video";
-  if (mimeType.startsWith("audio/")) return "audio";
+  if (!mimeType) {
+    return "file";
+  }
+  if (mimeType.startsWith("image/")) {
+    return "image";
+  }
+  if (mimeType.startsWith("video/")) {
+    return "video";
+  }
+  if (mimeType.startsWith("audio/")) {
+    return "audio";
+  }
   return "file";
 }

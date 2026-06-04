@@ -31,7 +31,11 @@ import { MessagePump } from "./internal/gateway";
 import { buildChatMessage } from "./internal/inbound";
 import { ModalPollRegistry } from "./internal/modals";
 import { emojiToGlyph, fileToAttachment } from "./internal/outbound";
-import { decodeThreadId, encodeThreadId, isDMChatGuid } from "./internal/thread";
+import {
+  decodeThreadId,
+  encodeThreadId,
+  isDMChatGuid,
+} from "./internal/thread";
 import { iMessageFormatConverter } from "./markdown";
 import type { IMessageClientEntry, iMessageThreadId } from "./types";
 
@@ -78,11 +82,7 @@ export class iMessageAdapter implements Adapter {
       this.projectId = config.projectId;
       this.projectSecret = config.projectSecret;
       this.phone = config.phone;
-      this.clients = config.clients
-        ? Array.isArray(config.clients)
-          ? config.clients
-          : [config.clients]
-        : undefined;
+      this.clients = toClientArray(config.clients);
     }
   }
 
@@ -119,9 +119,17 @@ export class iMessageAdapter implements Adapter {
       this.logger
     );
 
+    let mode: "local" | "cloud" | "self-host";
+    if (this.local) {
+      mode = "local";
+    } else if (projectId) {
+      mode = "cloud";
+    } else {
+      mode = "self-host";
+    }
     this.logger.info("iMessage adapter initialized", {
       local: this.local,
-      mode: this.local ? "local" : projectId ? "cloud" : "self-host",
+      mode,
     });
   }
 
@@ -149,7 +157,8 @@ export class iMessageAdapter implements Adapter {
       first = (await space.send(textContent(body))) ?? first;
     }
     for (const file of files) {
-      const sent = (await space.send(await fileToAttachment(file))) ?? undefined;
+      const sent =
+        (await space.send(await fileToAttachment(file))) ?? undefined;
       first ??= sent;
     }
 
@@ -183,7 +192,9 @@ export class iMessageAdapter implements Adapter {
       );
     }
 
-    await target.edit(textContent(this.formatConverter.renderPostable(message)));
+    await target.edit(
+      textContent(this.formatConverter.renderPostable(message))
+    );
     return { id: messageId, threadId, raw: target };
   }
 
@@ -262,7 +273,9 @@ export class iMessageAdapter implements Adapter {
     const space = this.requireSpace(threadId, "startTyping");
     await space.startTyping();
     setTimeout(() => {
-      void space.stopTyping().catch(() => {});
+      space.stopTyping().catch(() => {
+        // best-effort; ignore failures
+      });
     }, TYPING_DURATION_MS);
   }
 
@@ -332,7 +345,7 @@ export class iMessageAdapter implements Adapter {
 
   async startGatewayListener(
     options: WebhookOptions,
-    durationMs = 180000,
+    durationMs = 180_000,
     abortSignal?: AbortSignal
   ): Promise<Response> {
     if (!this.chat) {
@@ -341,7 +354,7 @@ export class iMessageAdapter implements Adapter {
     if (!options.waitUntil) {
       return new Response("waitUntil not provided", { status: 500 });
     }
-    if (!this.app || !this.pump) {
+    if (!(this.app && this.pump)) {
       return new Response("Adapter not initialized", { status: 500 });
     }
 
@@ -493,8 +506,17 @@ export class iMessageAdapter implements Adapter {
     const { chatGuid } = decodeThreadId(threadId);
     const space = this.cache.getSpace(chatGuid);
     if (!space) {
-      return undefined;
+      return;
     }
     return (await space.getMessage(messageId)) ?? undefined;
   }
+}
+
+function toClientArray(
+  clients: IMessageClientEntry | IMessageClientEntry[] | undefined
+): IMessageClientEntry[] | undefined {
+  if (!clients) {
+    return;
+  }
+  return Array.isArray(clients) ? clients : [clients];
 }

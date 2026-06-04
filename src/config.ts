@@ -50,6 +50,8 @@ export interface CreateiMessageAdapterOptions {
   serverUrl?: string;
 }
 
+const URL_SCHEME_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+
 /**
  * Normalize a legacy `serverUrl` into a gRPC `host:port` address.
  *
@@ -59,7 +61,7 @@ export interface CreateiMessageAdapterOptions {
  */
 export function deriveAddress(serverUrl: string): string {
   const trimmed = serverUrl.trim();
-  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed);
+  const hasScheme = URL_SCHEME_RE.test(trimmed);
   // Parse via URL so host/port (including bracketed IPv6) are handled
   // correctly. `URL.hostname` already wraps IPv6 in brackets — don't re-wrap.
   const url = new URL(hasScheme ? trimmed : `https://${trimmed}`);
