@@ -446,6 +446,17 @@ describe("iMessageAdapter constructor", () => {
     expect(adapter.projectSecret).toBe("secret");
   });
 
+  it("trims the webhook secret on direct construction", () => {
+    const adapter = new iMessageAdapter({
+      local: false,
+      logger: mockLogger,
+      projectId: "p",
+      projectSecret: "s",
+      webhookSecret: "  whsec_raw  ",
+    });
+    expect(adapter.webhookSecret).toBe("whsec_raw");
+  });
+
   it("throws on non-macOS platform in local mode", () => {
     const original = process.platform;
     Object.defineProperty(process, "platform", { value: "linux" });

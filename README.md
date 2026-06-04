@@ -330,7 +330,7 @@ This version re-platforms the adapter onto **spectrum-ts**. If you are upgrading
 - **Dependency** — replaces `@photon-ai/imessage-kit` + `@photon-ai/advanced-imessage-kit` with `spectrum-ts`.
 - **`IMESSAGE_SERVER_URL` is now a gRPC `host:port`** (self-host), not an `https://` / Socket.IO URL.
 - **New cloud path** — set `IMESSAGE_PROJECT_ID` + `IMESSAGE_PROJECT_SECRET` for Spectrum Cloud.
-- **Removed capabilities** (now `NotImplementedError`): `fetchMessages`, `fetchThread`, `removeReaction`, and proactive/cold `postMessage` to threads not seen in the current session. Local `fetchMessages` (previously supported) is also removed.
+- **Removed capabilities** (now `NotImplementedError`): `fetchMessages`, `fetchThread`, `removeReaction`, and cold `postMessage` to an unseen **group** thread (DMs are rebuilt from their address over gRPC — see [Limitations](#limitations)). Local `fetchMessages` (previously supported) is also removed.
 - **`adapter.sdk` → `adapter.app`** — the adapter now exposes the underlying `SpectrumInstance` as `adapter.app` (null until `initialize()`).
 
 ## Troubleshooting

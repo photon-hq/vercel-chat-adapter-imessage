@@ -94,7 +94,10 @@ export class iMessageAdapter implements Adapter {
       this.projectSecret = config.projectSecret;
       this.phone = config.phone;
       this.clients = toClientArray(config.clients);
-      this.webhookSecret = config.webhookSecret;
+      // Trim here too so direct `new iMessageAdapter(...)` matches the factory
+      // (createiMessageAdapter trims it): a stray space would otherwise fail
+      // signature verification only on the constructor path.
+      this.webhookSecret = config.webhookSecret?.trim();
     }
   }
 
