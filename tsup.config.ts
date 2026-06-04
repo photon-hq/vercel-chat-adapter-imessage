@@ -9,6 +9,7 @@ export default defineConfig({
   external: [
     "chat",
     "@chat-adapter/shared",
+    "mime-types",
     "spectrum-ts",
     "spectrum-ts/providers/imessage",
   ],

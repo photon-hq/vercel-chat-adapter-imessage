@@ -1,5 +1,6 @@
 import { ValidationError } from "@chat-adapter/shared";
 import type { EmojiValue, FileUpload } from "chat";
+import { lookup as lookupMimeType } from "mime-types";
 import { attachment, type ContentBuilder } from "spectrum-ts";
 
 const EMOJI_GLYPHS: Record<string, string> = {
@@ -46,14 +47,12 @@ export async function fileToAttachment(
   }
 
   const name = file.filename || "attachment";
-  const mimeType = (file as { mimeType?: string }).mimeType;
-  // `attachment(buffer, …)` derives MIME from `name`'s extension and throws if
-  // it can't — pass an explicit type, or fall back when there's no extension.
-  const options = mimeType
-    ? { name, mimeType }
-    : name.includes(".")
-      ? { name }
-      : { name, mimeType: "application/octet-stream" };
+  // Always resolve an explicit MIME type: spectrum's attachment() throws if it
+  // can't infer one from `name` (no octet-stream fallback, and dotted-but-
+  // unknown extensions still miss). Use the upload's type, else infer from the
+  // extension, else a generic binary type.
+  const mimeType =
+    file.mimeType || lookupMimeType(name) || "application/octet-stream";
 
-  return attachment(buffer, options);
+  return attachment(buffer, { name, mimeType });
 }

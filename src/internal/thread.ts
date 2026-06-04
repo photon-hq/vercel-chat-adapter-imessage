@@ -14,7 +14,14 @@ export function decodeThreadId(threadId: string): iMessageThreadId {
       `Invalid iMessage thread ID: ${threadId}`
     );
   }
-  return { chatGuid: threadId.slice(THREAD_PREFIX.length) };
+  const chatGuid = threadId.slice(THREAD_PREFIX.length);
+  if (!chatGuid) {
+    throw new ValidationError(
+      "imessage",
+      `Invalid iMessage thread ID: ${threadId} (empty chat GUID)`
+    );
+  }
+  return { chatGuid };
 }
 
 /** DM chat GUIDs use the `;-;` separator; group chats use `;+;`. */

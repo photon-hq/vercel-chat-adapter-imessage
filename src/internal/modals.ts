@@ -47,7 +47,11 @@ export class ModalPollRegistry {
       return undefined;
     }
     const option = meta.options.find((o) => o.label === optionTitle);
-    return { meta, value: option?.value ?? optionTitle };
+    if (!option) {
+      // Unknown option label — don't fabricate an unregistered submit value.
+      return undefined;
+    }
+    return { meta, value: option.value };
   }
 }
 

@@ -56,6 +56,13 @@ export class MessagePump {
           error: String(error),
         });
       } finally {
+        // Reset so a future ensureRunning() can restart the pump if the stream
+        // ended/threw on its own. Guard against clobbering a newer iterator
+        // installed by a concurrent restart.
+        if (this.iterator === iterator) {
+          this.iterator = null;
+          this.started = false;
+        }
         this.logger.info("iMessage Gateway listener stopped");
       }
     })();

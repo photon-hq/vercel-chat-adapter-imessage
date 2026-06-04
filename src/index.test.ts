@@ -448,6 +448,12 @@ describe("encodeThreadId / decodeThreadId / isDM", () => {
     );
   });
 
+  it("throws on an empty chat GUID", () => {
+    expect(() => localAdapter().decodeThreadId("imessage:")).toThrow(
+      "Invalid iMessage thread ID"
+    );
+  });
+
   it("detects DM vs group", () => {
     const adapter = localAdapter();
     expect(adapter.isDM("imessage:iMessage;-;+1234567890")).toBe(true);
@@ -574,6 +580,15 @@ describe("postMessage", () => {
     await expect(
       adapter.postMessage("imessage:iMessage;-;+1999999999", "Hi")
     ).rejects.toThrow(NotImplementedError);
+  });
+
+  it("throws when there is nothing to send (empty text, no files)", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+    await expect(
+      adapter.postMessage("imessage:iMessage;-;+1234567890", "")
+    ).rejects.toThrow("postMessage requires non-empty text");
   });
 });
 
@@ -907,6 +922,38 @@ describe("poll vote -> processModalSubmit", () => {
     );
     expect(mockChat.processModalSubmit).not.toHaveBeenCalled();
   });
+
+  it("ignores votes for an option label that is not registered", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      sendResult: { id: "poll-bad-opt" },
+    });
+    await adapter.openModal(
+      "imessage:iMessage;-;+1234567890",
+      surveyModal,
+      "ctx-123"
+    );
+
+    pushInbound([
+      space,
+      makeMessage("vote-bad", space, {
+        type: "poll_option",
+        selected: true,
+        poll: { title: "Survey", options: [] },
+        option: { title: "Not A Real Option" },
+      }),
+    ]);
+    pushInbound([
+      space,
+      makeMessage("after-bad", space, { type: "text", text: "after" }),
+    ]);
+    await vi.waitFor(() =>
+      expect(mockChat.processMessage).toHaveBeenCalledTimes(2)
+    );
+    expect(mockChat.processModalSubmit).not.toHaveBeenCalled();
+  });
 });
 
 describe("deriveAddress", () => {
@@ -915,6 +962,11 @@ describe("deriveAddress", () => {
     expect(deriveAddress("http://example.com/path")).toBe("example.com:443");
     expect(deriveAddress("example.com:8443")).toBe("example.com:8443");
     expect(deriveAddress("grpc.example.com:443")).toBe("grpc.example.com:443");
+  });
+
+  it("handles bracketed IPv6 addresses", () => {
+    expect(deriveAddress("https://[2001:db8::1]")).toBe("[2001:db8::1]:443");
+    expect(deriveAddress("[2001:db8::1]:8443")).toBe("[2001:db8::1]:8443");
   });
 });
 
@@ -976,5 +1028,24 @@ describe("createiMessageAdapter", () => {
       projectSecret: "config-secret",
     });
     expect(adapter.projectId).toBe("config-proj");
+  });
+
+  it("treats an empty clients array as missing config", () => {
+    expect(() => createiMessageAdapter({ local: false, clients: [] })).toThrow(
+      "serverUrl is required when local is false"
+    );
+  });
+
+  it("treats whitespace-only serverUrl/apiKey as missing", () => {
+    expect(() =>
+      createiMessageAdapter({ local: false, serverUrl: "   " })
+    ).toThrow("serverUrl is required when local is false");
+    expect(() =>
+      createiMessageAdapter({
+        local: false,
+        serverUrl: "grpc.example.com:443",
+        apiKey: "   ",
+      })
+    ).toThrow("apiKey is required when local is false");
   });
 });

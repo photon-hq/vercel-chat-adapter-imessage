@@ -31,14 +31,22 @@ export function createiMessageAdapter(
   const apiKey = config?.apiKey ?? process.env.IMESSAGE_API_KEY;
   const phone = config?.phone ?? process.env.IMESSAGE_PHONE;
 
-  if (!(projectId && projectSecret) && !clients) {
-    if (!serverUrl) {
+  // Treat an empty clients array and whitespace-only credentials as missing, so
+  // we fail here with a clear message instead of downstream in initialize().
+  const hasClients = Array.isArray(clients)
+    ? clients.length > 0
+    : Boolean(clients);
+  const hasServerUrl = Boolean(serverUrl?.trim());
+  const hasApiKey = Boolean(apiKey?.trim());
+
+  if (!(projectId && projectSecret) && !hasClients) {
+    if (!hasServerUrl) {
       throw new ValidationError(
         "imessage",
         "serverUrl is required when local is false. Set IMESSAGE_SERVER_URL (or use IMESSAGE_PROJECT_ID/IMESSAGE_PROJECT_SECRET for Spectrum Cloud), or provide it in config."
       );
     }
-    if (!apiKey) {
+    if (!hasApiKey) {
       throw new ValidationError(
         "imessage",
         "apiKey is required when local is false. Set IMESSAGE_API_KEY or provide it in config."

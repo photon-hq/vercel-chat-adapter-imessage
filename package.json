@@ -28,9 +28,11 @@
   },
   "dependencies": {
     "@chat-adapter/shared": "^4.15.0",
+    "mime-types": "^3.0.1",
     "spectrum-ts": "^1.18.0"
   },
   "devDependencies": {
+    "@types/mime-types": "^3.0.1",
     "@types/node": "^22.10.2",
     "@vitest/coverage-v8": "^4.0.18",
     "chat": "^4.15.0",

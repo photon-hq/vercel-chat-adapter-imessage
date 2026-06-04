@@ -153,7 +153,14 @@ export class iMessageAdapter implements Adapter {
       first ??= sent;
     }
 
-    return { id: first?.id ?? `msg-${Date.now()}`, threadId, raw: first };
+    if (!first) {
+      throw new ValidationError(
+        "imessage",
+        "postMessage requires non-empty text or at least one attachment"
+      );
+    }
+
+    return { id: first.id, threadId, raw: first };
   }
 
   async editMessage(
@@ -430,8 +437,9 @@ export class iMessageAdapter implements Adapter {
       content.option.title
     );
     if (!resolved) {
-      this.logger.debug("Poll vote for unknown poll, skipping", {
+      this.logger.debug("Poll vote did not match a known modal, skipping", {
         title: content.poll.title,
+        option: content.option.title,
       });
       return;
     }

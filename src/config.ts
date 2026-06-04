@@ -58,11 +58,12 @@ export interface CreateiMessageAdapterOptions {
  * appended when none is present.
  */
 export function deriveAddress(serverUrl: string): string {
-  const stripped = serverUrl
-    .trim()
-    .replace(/^[a-z][a-z0-9+.-]*:\/\//i, "")
-    .replace(/\/.*$/, "");
-  return stripped.includes(":") ? stripped : `${stripped}:443`;
+  const trimmed = serverUrl.trim();
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed);
+  // Parse via URL so host/port (including bracketed IPv6) are handled
+  // correctly. `URL.hostname` already wraps IPv6 in brackets — don't re-wrap.
+  const url = new URL(hasScheme ? trimmed : `https://${trimmed}`);
+  return `${url.hostname}:${url.port || "443"}`;
 }
 
 /** The resolved remote-auth fields the adapter holds. */
