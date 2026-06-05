@@ -15,8 +15,8 @@ jobs:
     with:
       service-name: chat-adapter-imessage
       working-directory: .
-      build-command: "pnpm run build"
-      publish-command: "pnpm exec clean-publish --package-manager npm"
+      build-command: "bun run build"
+      publish-command: "bunx clean-publish --package-manager npm"
       use-oidc: true
       dry-run: false
     secrets: inherit
