@@ -1,0 +1,22 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: read
+  id-token: write
+
+jobs:
+  release:
+    uses: photon-hq/buildspace/.github/workflows/typescript-service-release.yaml@main
+    with:
+      service-name: chat-adapter-imessage
+      working-directory: .
+      build-command: "pnpm run build"
+      publish-command: "pnpm exec clean-publish --package-manager npm"
+      use-oidc: true
+      dry-run: false
+    secrets: inherit
