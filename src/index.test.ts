@@ -557,6 +557,30 @@ describe("encodeThreadId / decodeThreadId / isDM", () => {
   });
 });
 
+describe("channelIdFromThreadId", () => {
+  it("returns the thread ID unchanged", () => {
+    const adapter = localAdapter();
+    expect(adapter.channelIdFromThreadId("imessage:iMessage;-;+1234567890")).toBe(
+      "imessage:iMessage;-;+1234567890"
+    );
+  });
+
+  it("passes through an empty string", () => {
+    expect(localAdapter().channelIdFromThreadId("")).toBe("");
+  });
+
+  it("round-trips arbitrary values", () => {
+    const adapter = localAdapter();
+    for (const id of [
+      "imessage:iMessage;+;chat493787071395575843",
+      "guid:ABC-123",
+      "  spaced  ",
+    ]) {
+      expect(adapter.channelIdFromThreadId(id)).toBe(id);
+    }
+  });
+});
+
 describe("handleWebhook", () => {
   it("routes a signed message delivery to processMessage", async () => {
     const adapter = webhookAdapter();
