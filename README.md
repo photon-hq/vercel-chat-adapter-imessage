@@ -1,11 +1,11 @@
-# chat-adapter-imessage
+# @photon-ai/chat-adapter-imessage
 
 iMessage community adapter for [Chat SDK](https://chat-sdk.dev/docs). Built on [spectrum-ts](https://github.com/photon-hq/spectrum-ts), Photon's unified messaging SDK. Supports **cloud** ([Spectrum Cloud](https://app.photon.codes)), **self-hosted**, and **local** (on-device, macOS) iMessage.
 
 ## Installation
 
 ```bash
-pnpm add chat chat-adapter-imessage
+pnpm add chat @photon-ai/chat-adapter-imessage
 ```
 
 ## Usage
@@ -22,7 +22,7 @@ The mode is auto-detected from environment variables (see [Configuration](#confi
 
 ```typescript
 import { Chat } from "chat";
-import { createiMessageAdapter } from "chat-adapter-imessage";
+import { createiMessageAdapter } from "@photon-ai/chat-adapter-imessage";
 
 const bot = new Chat({
   userName: "mybot",
@@ -46,7 +46,7 @@ For development or self-hosted deployments on a Mac. Reads from the local iMessa
 
 ```typescript
 import { Chat } from "chat";
-import { createiMessageAdapter } from "chat-adapter-imessage";
+import { createiMessageAdapter } from "@photon-ai/chat-adapter-imessage";
 
 const bot = new Chat({
   userName: "mybot",
@@ -263,7 +263,7 @@ Remote mode supports limited modal functionality by mapping the Chat SDK's `open
 
 ```typescript
 import { Chat, Modal, Select, SelectOption } from "chat";
-import { createiMessageAdapter } from "chat-adapter-imessage";
+import { createiMessageAdapter } from "@photon-ai/chat-adapter-imessage";
 
 const bot = new Chat({
   userName: "mybot",
