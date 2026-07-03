@@ -1,12 +1,17 @@
 /**
  * iMessage format conversion using AST-based parsing.
  *
- * iMessage supports plain text only -- no rich formatting syntax.
- * The converter strips formatting markers and outputs clean plain text,
- * preserving structure (lists, blockquotes, code blocks) with whitespace.
+ * Remote iMessage (via spectrum-ts) renders CommonMark natively as styled text
+ * (bold/italic/links etc. via UTF-16 formatting ranges), so markdown-typed
+ * outbound content is sent through spectrum's `markdown()` builder verbatim --
+ * see `renderPostableContent`. The plain-text rendering here (`fromAst`) is
+ * still used for inbound parsing, `renderFormatted`, and the raw/card fallback
+ * paths: it strips formatting markers and preserves structure (lists,
+ * blockquotes, code blocks) with whitespace.
  */
 
 import {
+  type AdapterPostableMessage,
   BaseFormatConverter,
   type Content,
   getNodeChildren,
@@ -24,7 +29,18 @@ import {
   isTextNode,
   parseMarkdown,
   type Root,
+  stringifyMarkdown,
 } from "chat";
+
+/**
+ * The spectrum content a postable message should be sent as: the body string
+ * plus whether spectrum should render it as native markdown (styled text) or
+ * pass it through as plain text.
+ */
+export interface PostableContent {
+  body: string;
+  markdown: boolean;
+}
 
 export class iMessageFormatConverter extends BaseFormatConverter {
   /**
@@ -43,6 +59,31 @@ export class iMessageFormatConverter extends BaseFormatConverter {
    */
   toAst(text: string): Root {
     return parseMarkdown(text);
+  }
+
+  /**
+   * Decide how a postable message should reach spectrum-ts.
+   *
+   * Markdown-typed inputs -- `{ markdown }` and `{ ast }` -- carry CommonMark
+   * the caller wants styled, so their source is preserved verbatim and flagged
+   * `markdown: true`; the adapter sends it via spectrum's `markdown()` builder,
+   * which renders bold/italic/links/lists as native iMessage styled text.
+   *
+   * Everything else is pass-through-as-is by contract -- a plain `string` or
+   * `{ raw }` must not have stray `*`/`_` reinterpreted as formatting, and
+   * cards fall back to plain text -- so those are rendered to plain text and
+   * flagged `markdown: false`.
+   */
+  renderPostableContent(message: AdapterPostableMessage): PostableContent {
+    if (message && typeof message === "object") {
+      if ("markdown" in message && typeof message.markdown === "string") {
+        return { body: message.markdown, markdown: true };
+      }
+      if ("ast" in message && message.ast) {
+        return { body: stringifyMarkdown(message.ast), markdown: true };
+      }
+    }
+    return { body: this.renderPostable(message), markdown: false };
   }
 
   private nodeToPlainText(node: Content): string {

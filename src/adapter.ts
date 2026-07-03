@@ -17,6 +17,8 @@ import type {
 } from "chat";
 import { NotImplementedError } from "chat";
 import {
+  type ContentBuilder,
+  markdown as markdownContent,
   poll as pollContent,
   Spectrum,
   type SpectrumInstance,
@@ -216,17 +218,35 @@ export class iMessageAdapter implements Adapter {
     return new Response(null, { status: 200 });
   }
 
+  /**
+   * Build the spectrum content for an outbound message. Markdown-typed inputs
+   * are sent via `markdown()` so remote iMessage renders them as native styled
+   * text; raw/string/card inputs stay plain `text()`. Returns the rendered
+   * `body` too so callers can skip an empty send.
+   */
+  private toSpectrumContent(message: AdapterPostableMessage): {
+    body: string;
+    content: ContentBuilder;
+  } {
+    const { body, markdown } =
+      this.formatConverter.renderPostableContent(message);
+    return {
+      body,
+      content: markdown ? markdownContent(body) : textContent(body),
+    };
+  }
+
   async postMessage(
     threadId: string,
     message: AdapterPostableMessage
   ): Promise<RawMessage> {
     const space = await this.requireSpace(threadId, "postMessage");
-    const body = this.formatConverter.renderPostable(message);
+    const { body, content } = this.toSpectrumContent(message);
     const files = extractFiles(message);
 
     let first: SpectrumMessage | undefined;
     if (body && body.trim().length > 0) {
-      first = (await space.send(textContent(body))) ?? first;
+      first = (await space.send(content)) ?? first;
     }
     for (const file of files) {
       const sent =
@@ -264,9 +284,7 @@ export class iMessageAdapter implements Adapter {
       );
     }
 
-    await target.edit(
-      textContent(this.formatConverter.renderPostable(message))
-    );
+    await target.edit(this.toSpectrumContent(message).content);
     return { id: messageId, threadId, raw: target };
   }
 

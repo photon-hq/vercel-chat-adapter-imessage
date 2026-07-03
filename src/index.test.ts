@@ -23,6 +23,7 @@ const { mockSpectrum, mockImessageConfig, mockImessage } = vi.hoisted(() => ({
 vi.mock("spectrum-ts", () => ({
   Spectrum: mockSpectrum,
   text: (t: string) => ({ __kind: "text", text: t }),
+  markdown: (m: string) => ({ __kind: "markdown", markdown: m }),
   attachment: (data: unknown, options: unknown) => ({
     __kind: "attachment",
     data,
@@ -912,6 +913,48 @@ describe("postMessage", () => {
     expect(result.threadId).toBe("imessage:iMessage;-;+1234567890");
   });
 
+  it("sends markdown-typed content as native markdown (styled on remote iMessage)", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      sendResult: { id: "remote-msg-md" },
+    });
+
+    const result = await adapter.postMessage(
+      "imessage:iMessage;-;+1234567890",
+      {
+        markdown: "**bold** and _italic_",
+      }
+    );
+
+    // Markdown source is preserved verbatim and sent via spectrum's markdown()
+    // builder rather than stripped to plain text.
+    expect(space.send).toHaveBeenCalledWith({
+      __kind: "markdown",
+      markdown: "**bold** and _italic_",
+    });
+    expect(result.id).toBe("remote-msg-md");
+  });
+
+  it("sends plain string content as text, leaving stray markers untouched", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      sendResult: { id: "remote-msg-raw" },
+    });
+
+    // A raw string is pass-through-as-is: `*` must NOT be reinterpreted as
+    // markdown, so it stays plain text().
+    await adapter.postMessage("imessage:iMessage;-;+1234567890", "2 * 3 = 6");
+
+    expect(space.send).toHaveBeenCalledWith({
+      __kind: "text",
+      text: "2 * 3 = 6",
+    });
+  });
+
   it("cold-sends to a DM not seen this session by rebuilding it from its chat GUID", async () => {
     const adapter = cloudAdapter();
     await init(adapter);
@@ -1007,6 +1050,26 @@ describe("editMessage", () => {
       text: "Updated text",
     });
     expect(result.id).toBe("msg-guid-001");
+  });
+
+  it("edits with markdown-typed content as native markdown", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { message } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      messageId: "msg-guid-md",
+    });
+
+    await adapter.editMessage(
+      "imessage:iMessage;-;+1234567890",
+      "msg-guid-md",
+      { markdown: "**updated**" }
+    );
+
+    expect(message.edit).toHaveBeenCalledWith({
+      __kind: "markdown",
+      markdown: "**updated**",
+    });
   });
 
   it("throws NotImplementedError when the message was not seen this session", async () => {

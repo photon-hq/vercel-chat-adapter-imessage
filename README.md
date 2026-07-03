@@ -323,7 +323,7 @@ iMessage uses tapbacks instead of emoji reactions. The adapter maps standard emo
 - **No thread/chat info.** `fetchThread` is not supported.
 - **Session-scoped delete & reaction removal.** `deleteMessage` unsends a message resolved from this session (subject to iMessage's ~2-minute unsend window); `removeReaction` retracts a tapback only if it was added via `addReaction` earlier in this session — spectrum-ts exposes no by-target reaction lookup.
 - **Local mode** supports sending (including cold sends by chat GUID), receiving, and opening DMs, but not reactions, typing, editing, deleting, marking read, modals, history, or thread info.
-- **Formatting.** iMessage is plain-text only; Markdown formatting is stripped when sending, preserving the text content.
+- **Formatting.** Markdown-typed content (`{ markdown }` or `{ ast }`) renders as native iMessage styled text on remote — bold, italics, links, and lists — via spectrum-ts's `markdown()` builder. Plain strings and `{ raw }` are sent as-is (never reinterpreted as Markdown). Inbound messages always surface as plain text.
 - **Platform.** Local mode requires macOS. Cloud and self-host run anywhere.
 - **Cards.** iMessage has no structured card layouts.
 
