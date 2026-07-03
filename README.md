@@ -246,6 +246,7 @@ IMESSAGE_WEBHOOK_SECRET=whsec_...               # per-webhook signing secret
 | Message delete | Remote only (iMessage unsend window) |
 | Mark read | Remote only (`markRead`) |
 | Typing indicator | Remote only |
+| Message effects | Remote only (`sendEffect`) |
 | Modals | Limited (Remote only) |
 | Fetch single message | Yes (`fetchMessage`) |
 | Message history | No |
@@ -316,13 +317,32 @@ iMessage uses tapbacks instead of emoji reactions. The adapter maps standard emo
 | `emphasize` / `exclamation` | Emphasize |
 | `question` | Question |
 
+## Message effects
+
+iMessage expressive-send effects animate a message when it arrives. The adapter exposes them through `sendEffect(threadId, message, effect)` — an adapter-specific extra (there is no first-class Chat SDK slot for effects). It sends the text with the effect attached and returns the sent message. Remote only; local mode throws `NotImplementedError`.
+
+```typescript
+import { createiMessageAdapter, iMessageEffect } from "@photon-ai/chat-adapter-imessage";
+
+const adapter = createiMessageAdapter({ local: false });
+
+bot.onNewMention(async (thread) => {
+  // Friendly name…
+  await adapter.sendEffect(thread.id, "🎉 Task complete!", "confetti");
+  // …or the typed constant:
+  await adapter.sendEffect(thread.id, "🎉 Task complete!", iMessageEffect.confetti);
+});
+```
+
+The `effect` argument accepts a friendly name or a value from the re-exported `iMessageEffect` map. Full-screen effects: `confetti`, `fireworks`, `balloons`, `heart`, `lasers`, `celebration`, `sparkles`, `spotlight`, `echo`. Bubble effects: `slam`, `loud`, `gentle`, `invisible` (invisible ink). Effects attach to text only, so `sendEffect` requires non-empty text content; an unknown effect throws a `ValidationError`.
+
 ## Limitations
 
 - **Cold sends need a resolvable line.** The adapter rebuilds a thread — DM or group — from its chat GUID via spectrum-ts's `space.get`, so it can send, react, edit, and show typing even into a thread it hasn't seen this session, including a [webhook](#webhooks) delivery. With **multiple iMessage lines** configured, spectrum-ts cannot infer which line an unseen chat belongs to, so cold sends there throw `NotImplementedError` — respond within a received message's thread instead.
 - **No message history.** `fetchMessages` is not supported — spectrum-ts exposes no paginated history API. Single messages resolve via `fetchMessage` (from the session cache or spectrum-ts's by-id lookup).
 - **No thread/chat info.** `fetchThread` is not supported.
 - **Session-scoped delete & reaction removal.** `deleteMessage` unsends a message resolved from this session (subject to iMessage's ~2-minute unsend window); `removeReaction` retracts a tapback only if it was added via `addReaction` earlier in this session — spectrum-ts exposes no by-target reaction lookup.
-- **Local mode** supports sending (including cold sends by chat GUID), receiving, and opening DMs, but not reactions, typing, editing, deleting, marking read, modals, history, or thread info.
+- **Local mode** supports sending (including cold sends by chat GUID), receiving, and opening DMs, but not reactions, typing, editing, deleting, marking read, effects, modals, history, or thread info.
 - **Formatting.** Markdown-typed content (`{ markdown }` or `{ ast }`) renders as native iMessage styled text on remote — bold, italics, links, and lists — via spectrum-ts's `markdown()` builder. Plain strings and `{ raw }` are sent as-is (never reinterpreted as Markdown). Inbound messages always surface as plain text.
 - **Platform.** Local mode requires macOS. Cloud and self-host run anywhere.
 - **Cards.** iMessage has no structured card layouts.

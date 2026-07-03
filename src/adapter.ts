@@ -26,8 +26,16 @@ import {
   type Space as SpectrumSpace,
   text as textContent,
 } from "spectrum-ts";
-import { imessage } from "spectrum-ts/providers/imessage";
+import {
+  effect as effectContent,
+  imessage,
+} from "spectrum-ts/providers/imessage";
 import { type iMessageAdapterConfig, resolveSpectrumConfig } from "./config";
+import {
+  type IMessageMessageEffect,
+  type iMessageEffectName,
+  resolveEffect,
+} from "./effects";
 import { InboundCache } from "./internal/cache";
 import { MessagePump } from "./internal/gateway";
 import { buildChatMessage } from "./internal/inbound";
@@ -262,6 +270,51 @@ export class iMessageAdapter implements Adapter {
     }
 
     return { id: first.id, threadId, raw: first };
+  }
+
+  /**
+   * Send a message with an iMessage expressive-send effect — a bubble effect
+   * (`slam`, `loud`, `gentle`, `invisible`) or a full-screen effect
+   * (`confetti`, `fireworks`, `balloons`, `heart`, `lasers`, `celebration`,
+   * `sparkles`, `spotlight`, `echo`). Not part of the Chat SDK `Adapter`
+   * interface — exposed as an adapter-specific extra (e.g. celebratory confetti
+   * on task completion). Remote only.
+   *
+   * The `effect` argument accepts a friendly name (`"confetti"`) or a value from
+   * the re-exported `iMessageEffect` map. Effects attach to text content only,
+   * so this requires non-empty text.
+   */
+  async sendEffect(
+    threadId: string,
+    message: AdapterPostableMessage,
+    effect: IMessageMessageEffect | iMessageEffectName
+  ): Promise<RawMessage> {
+    if (this.local) {
+      throw new NotImplementedError(
+        "sendEffect is not supported in local mode",
+        "sendEffect"
+      );
+    }
+
+    const space = await this.requireSpace(threadId, "sendEffect");
+    const { body, content } = this.toSpectrumContent(message);
+    if (!body || body.trim().length === 0) {
+      throw new ValidationError(
+        "imessage",
+        "sendEffect requires non-empty text content"
+      );
+    }
+
+    const effectId = resolveEffect(effect);
+    const sent = await space.send(effectContent(content, effectId));
+    if (!sent) {
+      throw new ValidationError(
+        "imessage",
+        "sendEffect could not send the message"
+      );
+    }
+
+    return { id: sent.id, threadId, raw: sent };
   }
 
   async editMessage(

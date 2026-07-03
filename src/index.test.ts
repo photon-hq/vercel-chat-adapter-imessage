@@ -37,7 +37,31 @@ vi.mock("spectrum-ts", () => ({
 }));
 
 vi.mock("spectrum-ts/providers/imessage", () => ({
-  imessage: Object.assign(mockImessage, { config: mockImessageConfig }),
+  imessage: Object.assign(mockImessage, {
+    config: mockImessageConfig,
+    effect: {
+      message: {
+        slam: "com.apple.MobileSMS.expressivesend.impact",
+        loud: "com.apple.MobileSMS.expressivesend.loud",
+        gentle: "com.apple.MobileSMS.expressivesend.gentle",
+        invisible: "com.apple.MobileSMS.expressivesend.invisibleink",
+        confetti: "com.apple.messages.effect.CKConfettiEffect",
+        fireworks: "com.apple.messages.effect.CKFireworksEffect",
+        balloons: "com.apple.messages.effect.CKBalloonEffect",
+        heart: "com.apple.messages.effect.CKHeartEffect",
+        lasers: "com.apple.messages.effect.CKLasersEffect",
+        celebration: "com.apple.messages.effect.CKHappyBirthdayEffect",
+        sparkles: "com.apple.messages.effect.CKSparklesEffect",
+        spotlight: "com.apple.messages.effect.CKSpotlightEffect",
+        echo: "com.apple.messages.effect.CKEchoEffect",
+      },
+    },
+  }),
+  effect: (content: unknown, messageEffect: string) => ({
+    __kind: "effect",
+    content,
+    effect: messageEffect,
+  }),
 }));
 
 vi.mock("chat", async (importOriginal) => {
@@ -1019,6 +1043,107 @@ describe("postMessage", () => {
     await expect(
       adapter.postMessage("imessage:iMessage;-;+1234567890", "")
     ).rejects.toThrow("postMessage requires non-empty text");
+  });
+});
+
+describe("sendEffect", () => {
+  it("wraps text with the resolved effect id (friendly name)", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      sendResult: { id: "effect-msg-1" },
+    });
+
+    const result = await adapter.sendEffect(
+      "imessage:iMessage;-;+1234567890",
+      "🎉 Task complete!",
+      "confetti"
+    );
+
+    expect(space.send).toHaveBeenCalledWith({
+      __kind: "effect",
+      content: { __kind: "text", text: "🎉 Task complete!" },
+      effect: "com.apple.messages.effect.CKConfettiEffect",
+    });
+    expect(result.id).toBe("effect-msg-1");
+    expect(result.threadId).toBe("imessage:iMessage;-;+1234567890");
+  });
+
+  it("accepts a raw spectrum-ts effect id", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.sendEffect(
+      "imessage:iMessage;-;+1234567890",
+      "boom",
+      "com.apple.MobileSMS.expressivesend.impact"
+    );
+
+    expect(space.send).toHaveBeenCalledWith({
+      __kind: "effect",
+      content: { __kind: "text", text: "boom" },
+      effect: "com.apple.MobileSMS.expressivesend.impact",
+    });
+  });
+
+  it("applies the effect to markdown-typed content", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.sendEffect(
+      "imessage:iMessage;-;+1234567890",
+      { markdown: "**done**" },
+      "fireworks"
+    );
+
+    expect(space.send).toHaveBeenCalledWith({
+      __kind: "effect",
+      content: { __kind: "markdown", markdown: "**done**" },
+      effect: "com.apple.messages.effect.CKFireworksEffect",
+    });
+  });
+
+  it("throws NotImplementedError in local mode", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
+    await expect(
+      adapter.sendEffect(
+        "imessage:iMessage;-;+1234567890",
+        "hooray",
+        "balloons"
+      )
+    ).rejects.toThrow("sendEffect is not supported in local mode");
+  });
+
+  it("throws ValidationError on an unknown effect", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(
+      adapter.sendEffect(
+        "imessage:iMessage;-;+1234567890",
+        "hi",
+        "sparkle" as never
+      )
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it("throws when there is no text to attach the effect to", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(
+      adapter.sendEffect("imessage:iMessage;-;+1234567890", "", "confetti")
+    ).rejects.toThrow("sendEffect requires non-empty text");
   });
 });
 
