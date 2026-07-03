@@ -238,12 +238,16 @@ IMESSAGE_WEBHOOK_SECRET=whsec_...               # per-webhook signing secret
 |---------|-----------|
 | Mentions | DMs only |
 | DMs | Yes |
+| Open DM (cold-start) | Yes (`openDM`) |
 | File uploads | Yes (send) |
 | Reactions (add) | Remote only |
-| Reactions (remove) | No |
+| Reactions (remove) | Remote only (session-added tapbacks) |
 | Message editing | Remote only |
+| Message delete | Remote only (iMessage unsend window) |
+| Mark read | Remote only (`markRead`) |
 | Typing indicator | Remote only |
 | Modals | Limited (Remote only) |
+| Fetch single message | Yes (`fetchMessage`) |
 | Message history | No |
 | Thread/chat info | No |
 | Cards | No |
@@ -315,10 +319,10 @@ iMessage uses tapbacks instead of emoji reactions. The adapter maps standard emo
 ## Limitations
 
 - **Cold sends need a resolvable line.** The adapter rebuilds a thread — DM or group — from its chat GUID via spectrum-ts's `space.get`, so it can send, react, edit, and show typing even into a thread it hasn't seen this session, including a [webhook](#webhooks) delivery. With **multiple iMessage lines** configured, spectrum-ts cannot infer which line an unseen chat belongs to, so cold sends there throw `NotImplementedError` — respond within a received message's thread instead.
-- **No message history.** `fetchMessages` is not supported — spectrum-ts exposes no paginated history API.
+- **No message history.** `fetchMessages` is not supported — spectrum-ts exposes no paginated history API. Single messages resolve via `fetchMessage` (from the session cache or spectrum-ts's by-id lookup).
 - **No thread/chat info.** `fetchThread` is not supported.
-- **No reaction removal.** `removeReaction` is not supported.
-- **Local mode** supports sending (including cold sends by chat GUID) and receiving, but not reactions, typing, editing, modals, history, or thread info.
+- **Session-scoped delete & reaction removal.** `deleteMessage` unsends a message resolved from this session (subject to iMessage's ~2-minute unsend window); `removeReaction` retracts a tapback only if it was added via `addReaction` earlier in this session — spectrum-ts exposes no by-target reaction lookup.
+- **Local mode** supports sending (including cold sends by chat GUID), receiving, and opening DMs, but not reactions, typing, editing, deleting, marking read, modals, history, or thread info.
 - **Formatting.** iMessage is plain-text only; Markdown formatting is stripped when sending, preserving the text content.
 - **Platform.** Local mode requires macOS. Cloud and self-host run anywhere.
 - **Cards.** iMessage has no structured card layouts.
@@ -330,7 +334,8 @@ This version re-platforms the adapter onto **spectrum-ts**. If you are upgrading
 - **Dependency** — replaces `@photon-ai/imessage-kit` + `@photon-ai/advanced-imessage-kit` with `spectrum-ts`.
 - **`IMESSAGE_SERVER_URL` is now a gRPC `host:port`** (self-host), not an `https://` / Socket.IO URL.
 - **New cloud path** — set `IMESSAGE_PROJECT_ID` + `IMESSAGE_PROJECT_SECRET` for Spectrum Cloud.
-- **Removed capabilities** (now `NotImplementedError`): `fetchMessages`, `fetchThread`, and `removeReaction`. Local `fetchMessages` (previously supported) is also removed. Cold `postMessage` works for DMs and groups alike (rebuilt from the chat GUID — see [Limitations](#limitations)).
+- **Unsupported capabilities** (throw `NotImplementedError`): `fetchMessages` and `fetchThread` — spectrum-ts exposes no paginated history or chat-info API. Local `fetchMessages` (previously supported) is also removed. Cold `postMessage` works for DMs and groups alike (rebuilt from the chat GUID — see [Limitations](#limitations)).
+- **Newly supported on spectrum-ts v8**: `deleteMessage` (unsend), `removeReaction` (retract a session-added tapback), `openDM` (cold-start a DM from a handle), `fetchMessage` (single message by id), and `markRead` — all remote-only where noted in [Features](#features).
 - **`adapter.sdk` → `adapter.app`** — the adapter now exposes the underlying `SpectrumInstance` as `adapter.app` (null until `initialize()`).
 
 ## Troubleshooting
@@ -349,9 +354,13 @@ This version re-platforms the adapter onto **spectrum-ts**. If you are upgrading
 - Verify **Full Disk Access** is granted to your terminal or application.
 - Check that iMessage is signed in and working.
 
-### `NotImplementedError` from `fetchMessages` / `fetchThread` / `removeReaction`
+### `NotImplementedError` from `fetchMessages` / `fetchThread`
 
 - These are not supported by spectrum-ts. See [Limitations](#limitations).
+
+### `NotImplementedError` from `deleteMessage` / `removeReaction` / `markRead`
+
+- These are remote-only and session-scoped. `deleteMessage` and `markRead` need the target message to have been seen this session (and delete is bound by iMessage's ~2-minute unsend window); `removeReaction` needs the tapback to have been added via `addReaction` this session. In local mode they throw. See [Limitations](#limitations).
 
 ## License
 

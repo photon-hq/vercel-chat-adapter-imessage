@@ -15,6 +15,13 @@ const DEFAULT_MAX_MESSAGES = 1024;
 export class InboundCache {
   private readonly spaces = new Map<string, SpectrumSpace>();
   private readonly messages = new Map<string, SpectrumMessage>();
+  /**
+   * Reaction messages this session sent via `addReaction`, keyed by their
+   * target so `removeReaction` can `unsend()` them. spectrum-ts models a
+   * tapback as its own message, and the only handle to retract one is the
+   * `Message` that `react()` returns — there is no by-target removal API.
+   */
+  private readonly reactions = new Map<string, SpectrumMessage>();
   private readonly maxSpaces: number;
   private readonly maxMessages: number;
 
@@ -54,6 +61,33 @@ export class InboundCache {
   getMessage(id: string): SpectrumMessage | undefined {
     return this.messages.get(id);
   }
+
+  /** Record the reaction message returned by `react()` for later removal. */
+  rememberReaction(
+    targetMessageId: string,
+    glyph: string,
+    reaction: SpectrumMessage
+  ): void {
+    this.reactions.set(reactionKey(targetMessageId, glyph), reaction);
+    evict(this.reactions, this.maxMessages);
+  }
+
+  /** Look up (and forget) a tracked reaction so it can be `unsend()`-ed once. */
+  takeReaction(
+    targetMessageId: string,
+    glyph: string
+  ): SpectrumMessage | undefined {
+    const key = reactionKey(targetMessageId, glyph);
+    const reaction = this.reactions.get(key);
+    if (reaction) {
+      this.reactions.delete(key);
+    }
+    return reaction;
+  }
+}
+
+function reactionKey(targetMessageId: string, glyph: string): string {
+  return `${targetMessageId}::${glyph}`;
 }
 
 function evict(map: Map<string, unknown>, max: number): void {

@@ -270,16 +270,45 @@ export class iMessageAdapter implements Adapter {
     return { id: messageId, threadId, raw: target };
   }
 
-  async deleteMessage(_threadId: string, _messageId: string): Promise<void> {
-    throw new NotImplementedError(
-      "deleteMessage is not implemented",
-      "deleteMessage"
-    );
+  async deleteMessage(threadId: string, messageId: string): Promise<void> {
+    if (this.local) {
+      throw new NotImplementedError(
+        "deleteMessage is not supported in local mode",
+        "deleteMessage"
+      );
+    }
+
+    const target = await this.resolveMessage(threadId, messageId);
+    if (!target) {
+      throw new NotImplementedError(
+        "deleteMessage requires the target message to have been sent or received in this session",
+        "deleteMessage"
+      );
+    }
+
+    await target.unsend();
   }
 
   parseMessage(raw: unknown): Message {
     const message = raw as SpectrumMessage;
     return buildChatMessage(message, message.space);
+  }
+
+  /**
+   * Fetch a single message by id. spectrum-ts can resolve a message by id
+   * (from the inbound cache or the provider's by-id lookup) even though it has
+   * no paginated history API, so single-message reads work where
+   * `fetchMessages` cannot. Returns `null` when the message can't be resolved.
+   */
+  async fetchMessage(
+    threadId: string,
+    messageId: string
+  ): Promise<Message | null> {
+    const target = await this.resolveMessage(threadId, messageId);
+    if (!target) {
+      return null;
+    }
+    return this.parseMessage(target);
   }
 
   async fetchMessages(
@@ -324,18 +353,36 @@ export class iMessageAdapter implements Adapter {
       );
     }
 
-    await target.react(glyph);
+    const reaction = await target.react(glyph);
+    if (reaction) {
+      this.cache.rememberReaction(messageId, glyph, reaction);
+    }
   }
 
   async removeReaction(
     _threadId: string,
-    _messageId: string,
-    _emoji: EmojiValue | string
+    messageId: string,
+    emoji: EmojiValue | string
   ): Promise<void> {
-    throw new NotImplementedError(
-      "removeReaction is not supported (spectrum-ts has no reaction-removal API)",
-      "removeReaction"
-    );
+    if (this.local) {
+      throw new NotImplementedError(
+        "removeReaction is not supported in local mode",
+        "removeReaction"
+      );
+    }
+
+    // spectrum-ts message ids are globally unique, so the target message id
+    // alone keys the reaction handle — the thread id isn't needed here.
+    const glyph = emojiToGlyph(emoji);
+    const reaction = this.cache.takeReaction(messageId, glyph);
+    if (!reaction) {
+      throw new NotImplementedError(
+        "removeReaction requires the reaction to have been added via addReaction in this session",
+        "removeReaction"
+      );
+    }
+
+    await reaction.unsend();
   }
 
   async startTyping(threadId: string, _status?: string): Promise<void> {
@@ -353,6 +400,49 @@ export class iMessageAdapter implements Adapter {
         // best-effort; ignore failures
       });
     }, TYPING_DURATION_MS);
+  }
+
+  /**
+   * Cold-start a DM with a phone number / handle. spectrum-ts resolves (or
+   * creates) the 1:1 conversation from the participant via `space.create`, so
+   * the bot can message a user it has never received from. Returns the encoded
+   * thread id, ready to pass to `postMessage`.
+   */
+  async openDM(userId: string): Promise<string> {
+    if (!this.app) {
+      throw new NotImplementedError(
+        "openDM requires the adapter to be initialized",
+        "openDM"
+      );
+    }
+
+    const space = await this.platformSpaces().create(userId);
+    this.cache.rememberSpace(space);
+    return encodeThreadId({ chatGuid: space.id });
+  }
+
+  /**
+   * Mark a received message (and the conversation up to it) as read, surfacing
+   * a read receipt where iMessage supports one. Remote only; not part of the
+   * Chat SDK `Adapter` interface — exposed as an adapter-specific extra.
+   */
+  async markRead(threadId: string, messageId: string): Promise<void> {
+    if (this.local) {
+      throw new NotImplementedError(
+        "markRead is not supported in local mode",
+        "markRead"
+      );
+    }
+
+    const target = await this.resolveMessage(threadId, messageId);
+    if (!target) {
+      throw new NotImplementedError(
+        "markRead requires the target message to have been received in this session",
+        "markRead"
+      );
+    }
+
+    await target.read();
   }
 
   async openModal(
@@ -602,13 +692,8 @@ export class iMessageAdapter implements Adapter {
     if (!this.app) {
       return;
     }
-    // `HasProvider` over the default provider tuple won't narrow to `true`, so
-    // the call types as `never`; cast to the slice of the instance we use.
-    const platform = imessage(this.app) as unknown as {
-      space: { get(id: string): Promise<SpectrumSpace> };
-    };
     try {
-      const space = await platform.space.get(chatGuid);
+      const space = await this.platformSpaces().get(chatGuid);
       this.cache.rememberSpace(space);
       return space;
     } catch (error) {
@@ -618,6 +703,28 @@ export class iMessageAdapter implements Adapter {
       });
       return;
     }
+  }
+
+  /**
+   * The iMessage provider's Space namespace (`get` / `create`). `HasProvider`
+   * over the default provider tuple won't narrow to `true`, so `imessage(app)`
+   * types as `never` — cast to the slice of the instance we use.
+   */
+  private platformSpaces(): {
+    get(id: string): Promise<SpectrumSpace>;
+    create(users: string): Promise<SpectrumSpace>;
+  } {
+    if (!this.app) {
+      throw new Error("Adapter not initialized");
+    }
+    return (
+      imessage(this.app) as unknown as {
+        space: {
+          get(id: string): Promise<SpectrumSpace>;
+          create(users: string): Promise<SpectrumSpace>;
+        };
+      }
+    ).space;
   }
 
   private async requireSpace(
