@@ -564,9 +564,9 @@ describe("encodeThreadId / decodeThreadId / isDM", () => {
 describe("channelIdFromThreadId", () => {
   it("returns the thread ID unchanged", () => {
     const adapter = localAdapter();
-    expect(adapter.channelIdFromThreadId("imessage:iMessage;-;+1234567890")).toBe(
-      "imessage:iMessage;-;+1234567890"
-    );
+    expect(
+      adapter.channelIdFromThreadId("imessage:iMessage;-;+1234567890")
+    ).toBe("imessage:iMessage;-;+1234567890");
   });
 
   it("passes through an empty string", () => {
