@@ -33,7 +33,6 @@ import { ModalPollRegistry } from "./internal/modals";
 import { emojiToGlyph, fileToAttachment } from "./internal/outbound";
 import {
   decodeThreadId,
-  dmAddressFromChatGuid,
   encodeThreadId,
   isDMChatGuid,
 } from "./internal/thread";
@@ -80,7 +79,7 @@ export class iMessageAdapter implements Adapter {
       throw new ValidationError(
         "imessage",
         "iMessage adapter local mode requires macOS. Current platform: " +
-          process.platform,
+          process.platform
       );
     }
 
@@ -113,7 +112,7 @@ export class iMessageAdapter implements Adapter {
         projectId: this.projectId,
         projectSecret: this.projectSecret,
         serverUrl: this.serverUrl,
-      },
+      }
     );
     const providers = [imessage.config(providerConfig)];
 
@@ -131,7 +130,7 @@ export class iMessageAdapter implements Adapter {
       },
       (space, message) =>
         this.routeInbound(space, message, this.gatewayOptions),
-      this.logger,
+      this.logger
     );
 
     let mode: "local" | "cloud" | "self-host";
@@ -152,15 +151,15 @@ export class iMessageAdapter implements Adapter {
    * Handle a Spectrum Cloud webhook delivery (signed JSON `messages` event).
    *
    * Verifies the `X-Spectrum-Signature` HMAC, then routes the message into the
-   * Chat SDK. Webhook deliveries are receive-only: a delivered thread has no
-   * live spectrum-ts `Space`, so replying/reacting still requires the gateway
-   * stream (see `startGatewayListener`).
+   * Chat SDK. A delivered thread has no live spectrum-ts `Space`, but the
+   * adapter rebuilds one from the chat GUID on demand (see `resolveSpace`), so
+   * replying works directly from a webhook delivery.
    *
    * @see https://photon.codes/docs/webhooks/overview
    */
   async handleWebhook(
     request: Request,
-    options?: WebhookOptions,
+    options?: WebhookOptions
   ): Promise<Response> {
     if (!this.chat) {
       return new Response("Chat instance not initialized", { status: 500 });
@@ -168,13 +167,13 @@ export class iMessageAdapter implements Adapter {
     if (this.local) {
       return new Response(
         "Webhooks require remote (cloud) mode — local mode receives via startGatewayListener()",
-        { status: 501 },
+        { status: 501 }
       );
     }
     if (!this.webhookSecret) {
       return new Response(
         "Webhook signing secret not configured (set IMESSAGE_WEBHOOK_SECRET)",
-        { status: 500 },
+        { status: 500 }
       );
     }
 
@@ -219,7 +218,7 @@ export class iMessageAdapter implements Adapter {
 
   async postMessage(
     threadId: string,
-    message: AdapterPostableMessage,
+    message: AdapterPostableMessage
   ): Promise<RawMessage> {
     const space = await this.requireSpace(threadId, "postMessage");
     const body = this.formatConverter.renderPostable(message);
@@ -238,7 +237,7 @@ export class iMessageAdapter implements Adapter {
     if (!first) {
       throw new ValidationError(
         "imessage",
-        "postMessage requires non-empty text or at least one attachment",
+        "postMessage requires non-empty text or at least one attachment"
       );
     }
 
@@ -248,12 +247,12 @@ export class iMessageAdapter implements Adapter {
   async editMessage(
     threadId: string,
     messageId: string,
-    message: AdapterPostableMessage,
+    message: AdapterPostableMessage
   ): Promise<RawMessage> {
     if (this.local) {
       throw new NotImplementedError(
         "editMessage is not supported in local mode",
-        "editMessage",
+        "editMessage"
       );
     }
 
@@ -261,12 +260,12 @@ export class iMessageAdapter implements Adapter {
     if (!target) {
       throw new NotImplementedError(
         "editMessage requires the original message to have been received in this session",
-        "editMessage",
+        "editMessage"
       );
     }
 
     await target.edit(
-      textContent(this.formatConverter.renderPostable(message)),
+      textContent(this.formatConverter.renderPostable(message))
     );
     return { id: messageId, threadId, raw: target };
   }
@@ -274,7 +273,7 @@ export class iMessageAdapter implements Adapter {
   async deleteMessage(_threadId: string, _messageId: string): Promise<void> {
     throw new NotImplementedError(
       "deleteMessage is not implemented",
-      "deleteMessage",
+      "deleteMessage"
     );
   }
 
@@ -285,18 +284,18 @@ export class iMessageAdapter implements Adapter {
 
   async fetchMessages(
     _threadId: string,
-    _options?: FetchOptions,
+    _options?: FetchOptions
   ): Promise<FetchResult> {
     throw new NotImplementedError(
       "fetchMessages (message history) is not supported by spectrum-ts",
-      "fetchMessages",
+      "fetchMessages"
     );
   }
 
   async fetchThread(_threadId: string): Promise<ThreadInfo> {
     throw new NotImplementedError(
       "fetchThread (chat info) is not supported by spectrum-ts",
-      "fetchThread",
+      "fetchThread"
     );
   }
 
@@ -307,12 +306,12 @@ export class iMessageAdapter implements Adapter {
   async addReaction(
     threadId: string,
     messageId: string,
-    emoji: EmojiValue | string,
+    emoji: EmojiValue | string
   ): Promise<void> {
     if (this.local) {
       throw new NotImplementedError(
         "addReaction is not supported in local mode",
-        "addReaction",
+        "addReaction"
       );
     }
 
@@ -321,7 +320,7 @@ export class iMessageAdapter implements Adapter {
     if (!target) {
       throw new NotImplementedError(
         "addReaction requires the target message to have been received in this session",
-        "addReaction",
+        "addReaction"
       );
     }
 
@@ -331,11 +330,11 @@ export class iMessageAdapter implements Adapter {
   async removeReaction(
     _threadId: string,
     _messageId: string,
-    _emoji: EmojiValue | string,
+    _emoji: EmojiValue | string
   ): Promise<void> {
     throw new NotImplementedError(
       "removeReaction is not supported (spectrum-ts has no reaction-removal API)",
-      "removeReaction",
+      "removeReaction"
     );
   }
 
@@ -343,7 +342,7 @@ export class iMessageAdapter implements Adapter {
     if (this.local) {
       throw new NotImplementedError(
         "startTyping is not supported in local mode",
-        "startTyping",
+        "startTyping"
       );
     }
 
@@ -359,22 +358,22 @@ export class iMessageAdapter implements Adapter {
   async openModal(
     triggerId: string,
     modal: ModalElement,
-    contextId?: string,
+    contextId?: string
   ): Promise<{ viewId: string }> {
     if (this.local) {
       throw new NotImplementedError(
         "openModal is not supported in local mode",
-        "openModal",
+        "openModal"
       );
     }
 
     const select = modal.children.find(
-      (c): c is SelectElement => c.type === "select",
+      (c): c is SelectElement => c.type === "select"
     );
     if (!select) {
       throw new ValidationError(
         "imessage",
-        "openModal requires at least one Select child — iMessage modals map to native polls",
+        "openModal requires at least one Select child — iMessage modals map to native polls"
       );
     }
 
@@ -382,7 +381,7 @@ export class iMessageAdapter implements Adapter {
     if (labels.length < 2 || labels.length > 10) {
       throw new ValidationError(
         "imessage",
-        `iMessage polls require between 2 and 10 options, received ${labels.length}`,
+        `iMessage polls require between 2 and 10 options, received ${labels.length}`
       );
     }
 
@@ -423,7 +422,7 @@ export class iMessageAdapter implements Adapter {
   async startGatewayListener(
     options: WebhookOptions,
     durationMs = 180_000,
-    abortSignal?: AbortSignal,
+    abortSignal?: AbortSignal
   ): Promise<Response> {
     if (!this.chat) {
       return new Response("Chat instance not initialized", { status: 500 });
@@ -471,13 +470,13 @@ export class iMessageAdapter implements Adapter {
       {
         status: 200,
         headers: { "Content-Type": "application/json" },
-      },
+      }
     );
   }
 
   private routeWebhookMessage(
     payload: SpectrumWebhookPayload,
-    options?: WebhookOptions,
+    options?: WebhookOptions
   ): void {
     if (!this.chat) {
       return;
@@ -500,7 +499,7 @@ export class iMessageAdapter implements Adapter {
   private async routeInbound(
     space: SpectrumSpace,
     message: SpectrumMessage,
-    options?: WebhookOptions,
+    options?: WebhookOptions
   ): Promise<void> {
     if (!this.chat) {
       return;
@@ -529,7 +528,7 @@ export class iMessageAdapter implements Adapter {
   private handlePollOption(
     space: SpectrumSpace,
     message: SpectrumMessage,
-    options?: WebhookOptions,
+    options?: WebhookOptions
   ): void {
     if (!this.chat) {
       return;
@@ -546,7 +545,7 @@ export class iMessageAdapter implements Adapter {
     const resolved = this.modals.resolveVote(
       space.id,
       content.poll.title,
-      content.option.title,
+      content.option.title
     );
     if (!resolved) {
       this.logger.debug("Poll vote did not match a known modal, skipping", {
@@ -576,7 +575,7 @@ export class iMessageAdapter implements Adapter {
         raw: message,
       },
       meta.contextId,
-      options,
+      options
     );
   }
 
@@ -585,48 +584,54 @@ export class iMessageAdapter implements Adapter {
    *
    * Prefers a live `Space` cached from the inbound stream (correct sending
    * line, no extra round-trip). On a miss — e.g. a webhook-only deployment, or
-   * a cold send — it reconstructs the Space over gRPC via
-   * `imessage(app).space([address])`. Only DMs can be rebuilt from a chatGuid:
-   * the resolver derives them from the peer address, whereas an unseen group
-   * has no by-id resolver (passing participants would create a *new* chat).
-   * Returns `undefined` when no Space can be obtained.
+   * a cold send — it rebuilds the Space from the chat GUID via
+   * `imessage(app).space.get(chatGuid)`, which works for DMs and groups alike.
+   * The rebuild can still fail when several iMessage lines are configured and
+   * spectrum-ts cannot infer which line the chat belongs to (`space.get`
+   * requires `params.phone` there). Returns `undefined` when no Space can be
+   * obtained.
    */
   private async resolveSpace(
-    threadId: string,
+    threadId: string
   ): Promise<SpectrumSpace | undefined> {
     const { chatGuid } = decodeThreadId(threadId);
     const cached = this.cache.getSpace(chatGuid);
     if (cached) {
       return cached;
     }
-    if (!this.app || this.local || !isDMChatGuid(chatGuid)) {
-      return;
-    }
-    const address = dmAddressFromChatGuid(chatGuid);
-    if (!address) {
+    if (!this.app) {
       return;
     }
     // `HasProvider` over the default provider tuple won't narrow to `true`, so
     // the call types as `never`; cast to the slice of the instance we use.
     const platform = imessage(this.app) as unknown as {
-      space(users: string[]): Promise<SpectrumSpace>;
+      space: { get(id: string): Promise<SpectrumSpace> };
     };
-    const space = await platform.space([address]);
-    this.cache.rememberSpace(space);
-    return space;
+    try {
+      const space = await platform.space.get(chatGuid);
+      this.cache.rememberSpace(space);
+      return space;
+    } catch (error) {
+      this.logger.debug("Could not rebuild Space from chat GUID", {
+        chatGuid,
+        error: String(error),
+      });
+      return;
+    }
   }
 
   private async requireSpace(
     threadId: string,
-    action: string,
+    action: string
   ): Promise<SpectrumSpace> {
     const space = await this.resolveSpace(threadId);
     if (!space) {
       throw new NotImplementedError(
-        `${action} requires a DM thread (rebuilt from its address) or a group ` +
-          "received in this session; spectrum-ts cannot reconstruct an unseen " +
-          "group chat from its id. Respond within a received message's thread instead.",
-        action,
+        `${action} could not resolve this thread. With multiple iMessage ` +
+          "lines configured, spectrum-ts needs the chat's sending line to " +
+          "rebuild an unseen thread. Respond within a received message's " +
+          "thread instead.",
+        action
       );
     }
     return space;
@@ -634,7 +639,7 @@ export class iMessageAdapter implements Adapter {
 
   private async resolveMessage(
     threadId: string,
-    messageId: string,
+    messageId: string
   ): Promise<SpectrumMessage | undefined> {
     const cached = this.cache.getMessage(messageId);
     if (cached) {
@@ -649,7 +654,7 @@ export class iMessageAdapter implements Adapter {
 }
 
 function toClientArray(
-  clients: IMessageClientEntry | IMessageClientEntry[] | undefined,
+  clients: IMessageClientEntry | IMessageClientEntry[] | undefined
 ): IMessageClientEntry[] | undefined {
   if (!clients) {
     return;

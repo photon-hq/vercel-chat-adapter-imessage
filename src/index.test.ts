@@ -392,11 +392,15 @@ beforeEach(() => {
   mockSpectrum.mockReset();
   mockSpectrum.mockResolvedValue(mockApp);
   mockImessageConfig.mockClear();
-  // Default: `imessage(app).space([address])` resolves a DM space over gRPC.
+  // Default: `imessage(app).space.get(chatGuid)` rebuilds a space by chat GUID.
   // Tests that assert on the resolved space override this per-case.
   mockImessage.mockReset();
   mockImessage.mockImplementation(() => ({
-    space: vi.fn(async (users: string[]) => makeSpace(`any;-;${users[0]}`)),
+    space: {
+      get: vi.fn(async (id: string) =>
+        makeSpace(id, id.includes(";-;") ? "dm" : "group")
+      ),
+    },
   }));
   for (const fn of Object.values(mockLogger)) {
     fn.mockClear?.();
@@ -560,9 +564,9 @@ describe("encodeThreadId / decodeThreadId / isDM", () => {
 describe("channelIdFromThreadId", () => {
   it("returns the thread ID unchanged", () => {
     const adapter = localAdapter();
-    expect(adapter.channelIdFromThreadId("imessage:iMessage;-;+1234567890")).toBe(
-      "imessage:iMessage;-;+1234567890"
-    );
+    expect(
+      adapter.channelIdFromThreadId("imessage:iMessage;-;+1234567890")
+    ).toBe("imessage:iMessage;-;+1234567890");
   });
 
   it("passes through an empty string", () => {
@@ -749,7 +753,7 @@ describe("handleWebhook", () => {
     expect(mockChat.processMessage).not.toHaveBeenCalled();
   });
 
-  it("lets the bot reply to a webhook-delivered DM via gRPC", async () => {
+  it("lets the bot reply to a webhook-delivered DM", async () => {
     const adapter = webhookAdapter();
     await init(adapter);
 
@@ -762,14 +766,14 @@ describe("handleWebhook", () => {
     const threadId = mockChat.processMessage.mock.calls[0]?.[1] as string;
     expect(threadId).toBe("imessage:any;-;+15550100");
 
-    // Reply: the adapter rebuilds the DM Space over gRPC and sends.
+    // Reply: the adapter rebuilds the Space from the chat GUID and sends.
     const replySpace = makeSpace("any;-;+15550100", "dm", { id: "reply-1" });
     const spaceResolver = vi.fn(async () => replySpace);
-    mockImessage.mockReturnValue({ space: spaceResolver });
+    mockImessage.mockReturnValue({ space: { get: spaceResolver } });
 
     const result = await adapter.postMessage(threadId, "hi back");
 
-    expect(spaceResolver).toHaveBeenCalledWith(["+15550100"]);
+    expect(spaceResolver).toHaveBeenCalledWith("any;-;+15550100");
     expect(replySpace.send).toHaveBeenCalledWith({
       __kind: "text",
       text: "hi back",
@@ -882,7 +886,7 @@ describe("postMessage", () => {
     expect(result.threadId).toBe("imessage:iMessage;-;+1234567890");
   });
 
-  it("cold-sends to a DM not seen this session by rebuilding it over gRPC", async () => {
+  it("cold-sends to a DM not seen this session by rebuilding it from its chat GUID", async () => {
     const adapter = cloudAdapter();
     await init(adapter);
 
@@ -890,21 +894,50 @@ describe("postMessage", () => {
       id: "cold-msg-1",
     });
     const spaceResolver = vi.fn(async () => coldSpace);
-    mockImessage.mockReturnValue({ space: spaceResolver });
+    mockImessage.mockReturnValue({ space: { get: spaceResolver } });
 
     const result = await adapter.postMessage(
       "imessage:any;-;+1999999999",
       "Hi"
     );
 
-    expect(spaceResolver).toHaveBeenCalledWith(["+1999999999"]);
+    expect(spaceResolver).toHaveBeenCalledWith("any;-;+1999999999");
     expect(coldSpace.send).toHaveBeenCalledWith({ __kind: "text", text: "Hi" });
     expect(result.id).toBe("cold-msg-1");
   });
 
-  it("throws NotImplementedError for an unseen group thread", async () => {
+  it("cold-sends to an unseen group thread by rebuilding it from its chat GUID", async () => {
     const adapter = cloudAdapter();
     await init(adapter);
+
+    const coldGroup = makeSpace("iMessage;+;chatUNSEEN", "group", {
+      id: "cold-group-msg-1",
+    });
+    const spaceResolver = vi.fn(async () => coldGroup);
+    mockImessage.mockReturnValue({ space: { get: spaceResolver } });
+
+    const result = await adapter.postMessage(
+      "imessage:iMessage;+;chatUNSEEN",
+      "Hi"
+    );
+
+    expect(spaceResolver).toHaveBeenCalledWith("iMessage;+;chatUNSEEN");
+    expect(coldGroup.send).toHaveBeenCalledWith({ __kind: "text", text: "Hi" });
+    expect(result.id).toBe("cold-group-msg-1");
+  });
+
+  it("throws NotImplementedError when the thread cannot be rebuilt", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    // e.g. multiple iMessage lines configured: spectrum-ts's `space.get`
+    // cannot infer the sending line and rejects.
+    mockImessage.mockReturnValue({
+      space: {
+        get: vi.fn(async () => {
+          throw new Error("iMessage space.get requires params.phone");
+        }),
+      },
+    });
     await expect(
       adapter.postMessage("imessage:iMessage;+;chatUNSEEN", "Hi")
     ).rejects.toThrow(NotImplementedError);

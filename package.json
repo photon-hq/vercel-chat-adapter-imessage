@@ -29,21 +29,21 @@
     "chat": "^4.14.0"
   },
   "dependencies": {
-    "@chat-adapter/shared": "^4.15.0",
-    "mime-types": "^3.0.1",
-    "spectrum-ts": "^1.18.0"
+    "@chat-adapter/shared": "^4.32.0",
+    "mime-types": "^3.0.2",
+    "spectrum-ts": "^8.2.1"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.12",
+    "@biomejs/biome": "^2.5.2",
     "@types/mime-types": "^3.0.1",
-    "@types/node": "^22.10.2",
-    "@vitest/coverage-v8": "^4.0.18",
-    "chat": "^4.15.0",
-    "clean-publish": "^7.0.0",
-    "tsup": "^8.3.5",
+    "@types/node": "^22.20.0",
+    "@vitest/coverage-v8": "^4.1.9",
+    "chat": "^4.32.0",
+    "clean-publish": "^7.1.0",
+    "tsup": "^8.5.1",
     "typescript": "^5.9.3",
-    "ultracite": "7.8.1",
-    "vitest": "^4.0.18"
+    "ultracite": "7.8.4",
+    "vitest": "^4.1.9"
   },
   "packageManager": "pnpm@10.30.3",
   "publishConfig": {
