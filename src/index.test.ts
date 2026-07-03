@@ -35,6 +35,11 @@ vi.mock("spectrum-ts", () => ({
     options,
   }),
   app: (url: unknown) => ({ __kind: "app", url }),
+  voice: (input: unknown, options: unknown) => ({
+    __kind: "voice",
+    input,
+    options,
+  }),
 }));
 
 vi.mock("spectrum-ts/providers/imessage", () => ({
@@ -1321,6 +1326,169 @@ describe("sendMiniApp", () => {
         url: "not a url",
       })
     ).rejects.toThrow("invalid url");
+  });
+});
+
+describe("sendVoice", () => {
+  const THREAD = "imessage:iMessage;-;+1234567890";
+
+  it("sends raw bytes as a voice note with an explicit MIME type", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      sendResult: { id: "voice-1" },
+    });
+
+    const result = await adapter.sendVoice(
+      THREAD,
+      new Uint8Array([1, 2, 3]),
+      { mimeType: "audio/mp4", duration: 4 }
+    );
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      __kind: string;
+      input: Buffer;
+      options: { mimeType: string; duration?: number };
+    };
+    expect(sent.__kind).toBe("voice");
+    expect(Buffer.isBuffer(sent.input)).toBe(true);
+    expect(Array.from(sent.input)).toEqual([1, 2, 3]);
+    expect(sent.options.mimeType).toBe("audio/mp4");
+    expect(sent.options.duration).toBe(4);
+    expect(result.id).toBe("voice-1");
+    expect(result.threadId).toBe(THREAD);
+  });
+
+  it("copies raw bytes into a fresh, detached Buffer", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    const source = new Uint8Array([9, 8, 7]);
+    await adapter.sendVoice(THREAD, source, { mimeType: "audio/mp4" });
+
+    const sent = space.send.mock.calls[0]?.[0] as { input: Buffer };
+    expect(Array.from(sent.input)).toEqual([9, 8, 7]);
+    expect(sent.input.buffer).not.toBe(source.buffer);
+  });
+
+  it("infers an audio MIME type from an audio file name", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.sendVoice(THREAD, new Uint8Array([1]), {
+      name: "reply.m4a",
+    });
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      options: { mimeType: string; name?: string };
+    };
+    expect(sent.options.mimeType).toBe("audio/mp4");
+    expect(sent.options.name).toBe("reply.m4a");
+  });
+
+  it("decodes a Blob and takes its MIME type", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.sendVoice(
+      THREAD,
+      new Blob([new Uint8Array([4, 5, 6])], { type: "audio/aac" })
+    );
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      input: Buffer;
+      options: { mimeType: string };
+    };
+    expect(Array.from(sent.input)).toEqual([4, 5, 6]);
+    expect(sent.options.mimeType).toBe("audio/aac");
+  });
+
+  it("unwraps a Chat SDK FileUpload's data and metadata", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.sendVoice(THREAD, {
+      data: Buffer.from([7, 7]),
+      filename: "note.m4a",
+      mimeType: "audio/mp4",
+    } as never);
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      input: Buffer;
+      options: { mimeType: string; name?: string };
+    };
+    expect(Array.from(sent.input)).toEqual([7, 7]);
+    expect(sent.options.mimeType).toBe("audio/mp4");
+    expect(sent.options.name).toBe("note.m4a");
+  });
+
+  it("passes an http(s) URL through to voice() for send-time fetch", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.sendVoice(THREAD, "https://example.com/speech.mp3");
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      __kind: string;
+      input: URL;
+    };
+    expect(sent.__kind).toBe("voice");
+    expect(sent.input).toBeInstanceOf(URL);
+    expect(sent.input.href).toBe("https://example.com/speech.mp3");
+  });
+
+  it("throws NotImplementedError in local mode", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
+    await expect(
+      adapter.sendVoice(THREAD, new Uint8Array([1]), { mimeType: "audio/mp4" })
+    ).rejects.toThrow("sendVoice is not supported in local mode");
+  });
+
+  it("throws ValidationError when the MIME type can't be resolved", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(
+      adapter.sendVoice(THREAD, new Uint8Array([1]))
+    ).rejects.toThrow("requires an audio/* MIME type");
+  });
+
+  it("throws ValidationError on a non-audio MIME type", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(
+      adapter.sendVoice(THREAD, new Uint8Array([1]), { mimeType: "video/mp4" })
+    ).rejects.toThrow('audio/* MIME type, got "video/mp4"');
+  });
+
+  it("throws ValidationError on a non-http(s) string input", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(adapter.sendVoice(THREAD, "not a url")).rejects.toThrow(
+      "must be an http(s) URL"
+    );
   });
 });
 

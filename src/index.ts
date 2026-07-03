@@ -24,3 +24,9 @@ export {
   resolveMiniApp,
 } from "./miniapp";
 export type { IMessageClientEntry, iMessageThreadId } from "./types";
+export {
+  resolveVoice,
+  type VoiceBytes,
+  type VoiceInput,
+  type VoiceOptions,
+} from "./voice";

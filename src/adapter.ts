@@ -61,6 +61,7 @@ import {
 import { iMessageFormatConverter } from "./markdown";
 import { isAppUrl, type MiniAppCard, resolveMiniApp } from "./miniapp";
 import type { IMessageClientEntry, iMessageThreadId } from "./types";
+import { resolveVoice, type VoiceInput, type VoiceOptions } from "./voice";
 
 const TYPING_DURATION_MS = 3000;
 
@@ -359,6 +360,44 @@ export class iMessageAdapter implements Adapter {
       throw new ValidationError(
         "imessage",
         "sendMiniApp could not send the card"
+      );
+    }
+
+    return { id: sent.id, threadId, raw: sent };
+  }
+
+  /**
+   * Send a native iMessage voice note — a real, playable waveform bubble (the
+   * message renders with `isAudioMessage`), not an audio file dropped in as an
+   * attachment. A natural fit for TTS-capable bots that reply with speech. Not
+   * part of the Chat SDK `Adapter` interface — exposed as an adapter-specific
+   * extra. Remote only.
+   *
+   * The `input` is either in-memory audio bytes (`Uint8Array` / `Buffer` /
+   * `ArrayBuffer`, a `Blob`, or a Chat SDK `FileUpload`) or an `http(s)` URL (a
+   * `URL` or a string) that is fetched at send time. Audio bytes need an
+   * `audio/*` MIME type — supply `options.mimeType` (e.g. `"audio/mp4"`) or an
+   * `options.name` with an audio extension when it can't be inferred.
+   */
+  async sendVoice(
+    threadId: string,
+    input: VoiceInput,
+    options?: VoiceOptions
+  ): Promise<RawMessage> {
+    if (this.local) {
+      throw new NotImplementedError(
+        "sendVoice is not supported in local mode",
+        "sendVoice"
+      );
+    }
+
+    const space = await this.requireSpace(threadId, "sendVoice");
+    const content = await resolveVoice(input, options);
+    const sent = await space.send(content);
+    if (!sent) {
+      throw new ValidationError(
+        "imessage",
+        "sendVoice could not send the voice message"
       );
     }
 
