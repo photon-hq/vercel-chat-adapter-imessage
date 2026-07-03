@@ -1,5 +1,11 @@
 export { iMessageAdapter } from "./adapter";
 export {
+  type BackgroundBytes,
+  type BackgroundInput,
+  type BackgroundOptions,
+  resolveBackground,
+} from "./background";
+export {
   type CreateiMessageAdapterOptions,
   deriveAddress,
   type iMessageAdapterConfig,

@@ -33,6 +33,11 @@ import {
   effect as effectContent,
   imessage,
 } from "spectrum-ts/providers/imessage";
+import {
+  type BackgroundInput,
+  type BackgroundOptions,
+  resolveBackground,
+} from "./background";
 import { type iMessageAdapterConfig, resolveSpectrumConfig } from "./config";
 import {
   type IMessageMessageEffect,
@@ -402,6 +407,39 @@ export class iMessageAdapter implements Adapter {
     }
 
     return { id: sent.id, threadId, raw: sent };
+  }
+
+  /**
+   * Set or clear the chat background — the wallpaper behind a conversation, an
+   * iMessage-only touch with no analog on the plain-text competitors. Not part
+   * of the Chat SDK `Adapter` interface — exposed as an adapter-specific extra.
+   * Remote only.
+   *
+   * The `input` is either the literal `"clear"` (to remove the current
+   * background), in-memory image bytes (`Uint8Array` / `Buffer` / `ArrayBuffer`,
+   * a `Blob`, or a Chat SDK `FileUpload`), or an `http(s)` URL (a `URL` or a
+   * string) that is fetched at send time. Image bytes need an `image/*` MIME
+   * type — supply `options.mimeType` (e.g. `"image/jpeg"`) or an `options.name`
+   * with an image extension when it can't be inferred.
+   *
+   * Fire-and-forget: iMessage acknowledges the control signal without returning
+   * a message, so this resolves to `void` rather than a {@link RawMessage}.
+   */
+  async setBackground(
+    threadId: string,
+    input: BackgroundInput,
+    options?: BackgroundOptions
+  ): Promise<void> {
+    if (this.local) {
+      throw new NotImplementedError(
+        "setBackground is not supported in local mode",
+        "setBackground"
+      );
+    }
+
+    const space = await this.requireSpace(threadId, "setBackground");
+    const content = await resolveBackground(input, options);
+    await space.send(content);
   }
 
   async editMessage(

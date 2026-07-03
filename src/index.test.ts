@@ -69,6 +69,11 @@ vi.mock("spectrum-ts/providers/imessage", () => ({
     effect: messageEffect,
   }),
   customizedMiniApp: (input: unknown) => ({ __kind: "mini-app", input }),
+  background: (input: unknown, options: unknown) => ({
+    __kind: "background",
+    input,
+    options,
+  }),
 }));
 
 vi.mock("chat", async (importOriginal) => {
@@ -1340,11 +1345,10 @@ describe("sendVoice", () => {
       sendResult: { id: "voice-1" },
     });
 
-    const result = await adapter.sendVoice(
-      THREAD,
-      new Uint8Array([1, 2, 3]),
-      { mimeType: "audio/mp4", duration: 4 }
-    );
+    const result = await adapter.sendVoice(THREAD, new Uint8Array([1, 2, 3]), {
+      mimeType: "audio/mp4",
+      duration: 4,
+    });
 
     const sent = space.send.mock.calls[0]?.[0] as {
       __kind: string;
@@ -1487,6 +1491,192 @@ describe("sendVoice", () => {
     await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
 
     await expect(adapter.sendVoice(THREAD, "not a url")).rejects.toThrow(
+      "must be an http(s) URL"
+    );
+  });
+});
+
+describe("setBackground", () => {
+  const THREAD = "imessage:iMessage;-;+1234567890";
+
+  it("sets the background from raw bytes with an explicit MIME type", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    const result = await adapter.setBackground(
+      THREAD,
+      new Uint8Array([1, 2, 3]),
+      {
+        mimeType: "image/jpeg",
+      }
+    );
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      __kind: string;
+      input: Buffer;
+      options: { mimeType: string };
+    };
+    expect(sent.__kind).toBe("background");
+    expect(Buffer.isBuffer(sent.input)).toBe(true);
+    expect(Array.from(sent.input)).toEqual([1, 2, 3]);
+    expect(sent.options.mimeType).toBe("image/jpeg");
+    // Fire-and-forget: no message id surfaced.
+    expect(result).toBeUndefined();
+  });
+
+  it("copies raw bytes into a fresh, detached Buffer", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    const source = new Uint8Array([9, 8, 7]);
+    await adapter.setBackground(THREAD, source, { mimeType: "image/png" });
+
+    const sent = space.send.mock.calls[0]?.[0] as { input: Buffer };
+    expect(Array.from(sent.input)).toEqual([9, 8, 7]);
+    expect(sent.input.buffer).not.toBe(source.buffer);
+  });
+
+  it("infers an image MIME type from an image file name", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.setBackground(THREAD, new Uint8Array([1]), {
+      name: "wallpaper.png",
+    });
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      options: { mimeType: string };
+    };
+    expect(sent.options.mimeType).toBe("image/png");
+  });
+
+  it("decodes a Blob and takes its MIME type", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.setBackground(
+      THREAD,
+      new Blob([new Uint8Array([4, 5, 6])], { type: "image/webp" })
+    );
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      input: Buffer;
+      options: { mimeType: string };
+    };
+    expect(Array.from(sent.input)).toEqual([4, 5, 6]);
+    expect(sent.options.mimeType).toBe("image/webp");
+  });
+
+  it("unwraps a Chat SDK FileUpload's data and metadata", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.setBackground(THREAD, {
+      data: Buffer.from([7, 7]),
+      filename: "bg.png",
+      mimeType: "image/png",
+    } as never);
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      input: Buffer;
+      options: { mimeType: string };
+    };
+    expect(Array.from(sent.input)).toEqual([7, 7]);
+    expect(sent.options.mimeType).toBe("image/png");
+  });
+
+  it('clears the background via the "clear" sentinel', async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.setBackground(THREAD, "clear");
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      __kind: string;
+      input: string;
+      options: unknown;
+    };
+    expect(sent.__kind).toBe("background");
+    expect(sent.input).toBe("clear");
+    expect(sent.options).toBeUndefined();
+  });
+
+  it("passes an http(s) URL through to background() for send-time fetch", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.setBackground(THREAD, "https://example.com/wallpaper.jpg");
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      __kind: string;
+      input: URL;
+      options: unknown;
+    };
+    expect(sent.__kind).toBe("background");
+    expect(sent.input).toBeInstanceOf(URL);
+    expect(sent.input.href).toBe("https://example.com/wallpaper.jpg");
+    expect(sent.options).toBeUndefined();
+  });
+
+  it("throws NotImplementedError in local mode", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
+    await expect(
+      adapter.setBackground(THREAD, new Uint8Array([1]), {
+        mimeType: "image/png",
+      })
+    ).rejects.toThrow("setBackground is not supported in local mode");
+  });
+
+  it("throws ValidationError when the MIME type can't be resolved", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(
+      adapter.setBackground(THREAD, new Uint8Array([1]))
+    ).rejects.toThrow("requires an image/* MIME type");
+  });
+
+  it("throws ValidationError on a non-image MIME type", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(
+      adapter.setBackground(THREAD, new Uint8Array([1]), {
+        mimeType: "audio/mp4",
+      })
+    ).rejects.toThrow('image/* MIME type, got "audio/mp4"');
+  });
+
+  it("throws ValidationError on a non-http(s) string input", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(adapter.setBackground(THREAD, "./local.png")).rejects.toThrow(
       "must be an http(s) URL"
     );
   });

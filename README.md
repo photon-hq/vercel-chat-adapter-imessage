@@ -248,6 +248,8 @@ IMESSAGE_WEBHOOK_SECRET=whsec_...               # per-webhook signing secret
 | Typing indicator | Remote only |
 | Message effects | Remote only (`sendEffect`) |
 | Mini-app cards | Remote only (`sendMiniApp`) |
+| Voice messages | Remote only (`sendVoice`) |
+| Chat background | Remote only (`setBackground`) |
 | Modals | Limited (Remote only) |
 | Fetch single message | Yes (`fetchMessage`) |
 | Message history | No |
@@ -382,6 +384,27 @@ await adapter.sendMiniApp(thread.id, {
 ```
 
 `appName`, `teamId`, and `extensionBundleId` identify the iMessage extension that opens (receiving `url`) when the recipient taps the card; the server builds the matching `MSMessageExtensionBalloonPlugin` id from `teamId` + `extensionBundleId`. Every `layout` field is optional. The `url` accepts a string or `URL` and is validated; a missing required field or an invalid URL throws a `ValidationError`.
+
+## Chat background
+
+iMessage lets a conversation carry its own wallpaper — a touch with no analog on the plain-text competitors. The adapter exposes it through `setBackground(threadId, input, options?)` — an adapter-specific extra (there is no first-class Chat SDK slot for it). It is fire-and-forget: iMessage acknowledges the control signal without returning a message, so the call resolves to `void`. Remote only; local mode throws `NotImplementedError`.
+
+```typescript
+import { readFile } from "node:fs/promises";
+
+// From image bytes (Uint8Array | Buffer | ArrayBuffer | Blob | FileUpload).
+await adapter.setBackground(thread.id, await readFile("./wallpaper.jpg"), {
+  mimeType: "image/jpeg",
+});
+
+// From an http(s) URL, fetched at send time.
+await adapter.setBackground(thread.id, "https://example.com/wallpaper.jpg");
+
+// Remove the current background.
+await adapter.setBackground(thread.id, "clear");
+```
+
+Pass the literal `"clear"` to remove the current background, in-memory image bytes, or an `http(s)` URL (a `URL` or a string) that spectrum-ts fetches at send time. Image bytes need an `image/*` MIME type — supply `options.mimeType` (e.g. `"image/jpeg"`) or an `options.name` with an image extension when it can't be inferred. Local file-path strings are rejected — read the file into bytes and pass those instead. A non-image MIME type, an unresolvable MIME type, or a non-`http(s)` string throws a `ValidationError`.
 
 ## Limitations
 
