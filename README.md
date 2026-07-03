@@ -247,11 +247,12 @@ IMESSAGE_WEBHOOK_SECRET=whsec_...               # per-webhook signing secret
 | Mark read | Remote only (`markRead`) |
 | Typing indicator | Remote only |
 | Message effects | Remote only (`sendEffect`) |
+| Mini-app cards | Remote only (`sendMiniApp`) |
 | Modals | Limited (Remote only) |
 | Fetch single message | Yes (`fetchMessage`) |
 | Message history | No |
 | Thread/chat info | No |
-| Cards | No |
+| Cards | Mini-app cards only (`sendMiniApp`) |
 | Streaming | No |
 | Ephemeral messages | No |
 | Webhooks | Yes (remote — Spectrum Cloud delivery) |
@@ -335,6 +336,52 @@ bot.onNewMention(async (thread) => {
 ```
 
 The `effect` argument accepts a friendly name or a value from the re-exported `iMessageEffect` map. Full-screen effects: `confetti`, `fireworks`, `balloons`, `heart`, `lasers`, `celebration`, `sparkles`, `spotlight`, `echo`. Bubble effects: `slam`, `loud`, `gentle`, `invisible` (invisible ink). Effects attach to text only, so `sendEffect` requires non-empty text content; an unknown effect throws a `ValidationError`.
+
+## Mini-app cards
+
+Mini-app cards are native `MSMessageExtension` balloons — a rich card with a tap-through URL, the closest iMessage gets to a Slack-style rich card rather than a bare link. The adapter exposes them through `sendMiniApp(threadId, card)` — an adapter-specific extra (there is no first-class Chat SDK slot for cards). Remote only; local mode throws `NotImplementedError`.
+
+`sendMiniApp` takes **either** a bare URL **or** a fully-specified card.
+
+### Just a URL (`app(url)`)
+
+The lightweight form: pass a URL string and iMessage renders it as a mini-app — no extension identifiers required. You can also pass a `Promise<string>` or a thunk (`() => string | Promise<string>`), so the link can be minted at send time (e.g. a signed URL).
+
+```typescript
+import { createiMessageAdapter } from "@photon-ai/chat-adapter-imessage";
+
+const adapter = createiMessageAdapter({ local: false });
+
+bot.onNewMention(async (thread) => {
+  await adapter.sendMiniApp(thread.id, "https://example.com/menu");
+
+  // …or compute the URL lazily at send time:
+  await adapter.sendMiniApp(thread.id, async () => mintSignedLink(thread.id));
+});
+```
+
+### A full card (`customizedMiniApp`)
+
+Pass an object to control the bubble's image, captions, and the exact iMessage extension that opens on tap.
+
+```typescript
+await adapter.sendMiniApp(thread.id, {
+  appName: "Poll Kit",
+  teamId: "TEAM123",
+  extensionBundleId: "com.example.pollkit.MessagesExtension",
+  url: "https://example.com/poll/42",
+  appStoreId: 1_234_567, // optional — for recipients without the extension
+  layout: {
+    caption: "Pizza night?",
+    subcaption: "Tap to vote",
+    imageTitle: "Friday",
+    image: pngBytes, // Uint8Array | Buffer | ArrayBuffer | Blob | FileUpload
+    summary: "Vote on Friday's dinner",
+  },
+});
+```
+
+`appName`, `teamId`, and `extensionBundleId` identify the iMessage extension that opens (receiving `url`) when the recipient taps the card; the server builds the matching `MSMessageExtensionBalloonPlugin` id from `teamId` + `extensionBundleId`. Every `layout` field is optional. The `url` accepts a string or `URL` and is validated; a missing required field or an invalid URL throws a `ValidationError`.
 
 ## Limitations
 

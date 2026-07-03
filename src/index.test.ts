@@ -34,6 +34,7 @@ vi.mock("spectrum-ts", () => ({
     title,
     options,
   }),
+  app: (url: unknown) => ({ __kind: "app", url }),
 }));
 
 vi.mock("spectrum-ts/providers/imessage", () => ({
@@ -62,6 +63,7 @@ vi.mock("spectrum-ts/providers/imessage", () => ({
     content,
     effect: messageEffect,
   }),
+  customizedMiniApp: (input: unknown) => ({ __kind: "mini-app", input }),
 }));
 
 vi.mock("chat", async (importOriginal) => {
@@ -1144,6 +1146,181 @@ describe("sendEffect", () => {
     await expect(
       adapter.sendEffect("imessage:iMessage;-;+1234567890", "", "confetti")
     ).rejects.toThrow("sendEffect requires non-empty text");
+  });
+});
+
+describe("sendMiniApp", () => {
+  const sampleCard = {
+    appName: "Poll Kit",
+    teamId: "TEAM123",
+    extensionBundleId: "com.example.pollkit.MessagesExtension",
+    url: "https://example.com/poll/42",
+    layout: {
+      caption: "Pizza night?",
+      subcaption: "Tap to vote",
+      summary: "Vote on Friday's dinner",
+    },
+  };
+
+  it("sends the lightweight app(url) card from a bare URL string", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      sendResult: { id: "app-url-1" },
+    });
+
+    const result = await adapter.sendMiniApp(
+      "imessage:iMessage;-;+1234567890",
+      "https://example.com/menu"
+    );
+
+    expect(space.send).toHaveBeenCalledWith({
+      __kind: "app",
+      url: "https://example.com/menu",
+    });
+    expect(result.id).toBe("app-url-1");
+  });
+
+  it("passes a thunk URL straight through to app()", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    const thunk = () => "https://example.com/signed";
+    await adapter.sendMiniApp("imessage:iMessage;-;+1234567890", thunk);
+
+    expect(space.send).toHaveBeenCalledWith({ __kind: "app", url: thunk });
+  });
+
+  it("sends a customized mini-app card via the cached Space", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      sendResult: { id: "mini-app-1" },
+    });
+
+    const result = await adapter.sendMiniApp(
+      "imessage:iMessage;-;+1234567890",
+      sampleCard
+    );
+
+    expect(space.send).toHaveBeenCalledWith({
+      __kind: "mini-app",
+      input: expect.objectContaining({
+        appName: "Poll Kit",
+        teamId: "TEAM123",
+        extensionBundleId: "com.example.pollkit.MessagesExtension",
+        url: "https://example.com/poll/42",
+        layout: expect.objectContaining({
+          caption: "Pizza night?",
+          subcaption: "Tap to vote",
+          summary: "Vote on Friday's dinner",
+        }),
+      }),
+    });
+    expect(result.id).toBe("mini-app-1");
+    expect(result.threadId).toBe("imessage:iMessage;-;+1234567890");
+  });
+
+  it("normalizes a URL instance and forwards appStoreId", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.sendMiniApp("imessage:iMessage;-;+1234567890", {
+      ...sampleCard,
+      url: new URL("https://example.com/poll/42"),
+      appStoreId: 123_456,
+    });
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      input: { url: string; appStoreId?: number };
+    };
+    expect(sent.input.url).toBe("https://example.com/poll/42");
+    expect(sent.input.appStoreId).toBe(123_456);
+  });
+
+  it("decodes a Blob image to bytes", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.sendMiniApp("imessage:iMessage;-;+1234567890", {
+      ...sampleCard,
+      layout: {
+        ...sampleCard.layout,
+        image: new Blob([new Uint8Array([1, 2, 3])]),
+      },
+    });
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      input: { layout: { image?: Uint8Array } };
+    };
+    expect(sent.input.layout.image).toBeInstanceOf(Uint8Array);
+    expect(Array.from(sent.input.layout.image ?? [])).toEqual([1, 2, 3]);
+  });
+
+  it("copies raw bytes into a fresh, detached Uint8Array", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    const source = new Uint8Array([9, 8, 7]);
+    await adapter.sendMiniApp("imessage:iMessage;-;+1234567890", {
+      ...sampleCard,
+      layout: { image: source },
+    });
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      input: { layout: { image?: Uint8Array } };
+    };
+    // Same bytes, but a detached copy — not the caller's buffer.
+    expect(Array.from(sent.input.layout.image ?? [])).toEqual([9, 8, 7]);
+    expect(sent.input.layout.image).not.toBe(source);
+  });
+
+  it("throws NotImplementedError in local mode", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
+    await expect(
+      adapter.sendMiniApp("imessage:iMessage;-;+1234567890", sampleCard)
+    ).rejects.toThrow("sendMiniApp is not supported in local mode");
+  });
+
+  it("throws ValidationError on a missing required field", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(
+      adapter.sendMiniApp("imessage:iMessage;-;+1234567890", {
+        ...sampleCard,
+        teamId: "",
+      })
+    ).rejects.toThrow('Mini-app card requires a non-empty "teamId"');
+  });
+
+  it("throws ValidationError on an invalid url", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(
+      adapter.sendMiniApp("imessage:iMessage;-;+1234567890", {
+        ...sampleCard,
+        url: "not a url",
+      })
+    ).rejects.toThrow("invalid url");
   });
 });
 

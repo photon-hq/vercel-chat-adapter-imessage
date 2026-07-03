@@ -17,6 +17,8 @@ import type {
 } from "chat";
 import { NotImplementedError } from "chat";
 import {
+  type AppUrl,
+  app as appContent,
   type ContentBuilder,
   markdown as markdownContent,
   poll as pollContent,
@@ -27,6 +29,7 @@ import {
   text as textContent,
 } from "spectrum-ts";
 import {
+  customizedMiniApp,
   effect as effectContent,
   imessage,
 } from "spectrum-ts/providers/imessage";
@@ -56,6 +59,7 @@ import {
   verifySpectrumSignature,
 } from "./internal/webhook";
 import { iMessageFormatConverter } from "./markdown";
+import { isAppUrl, type MiniAppCard, resolveMiniApp } from "./miniapp";
 import type { IMessageClientEntry, iMessageThreadId } from "./types";
 
 const TYPING_DURATION_MS = 3000;
@@ -311,6 +315,50 @@ export class iMessageAdapter implements Adapter {
       throw new ValidationError(
         "imessage",
         "sendEffect could not send the message"
+      );
+    }
+
+    return { id: sent.id, threadId, raw: sent };
+  }
+
+  /**
+   * Send an iMessage mini-app card — an `MSMessageExtension` balloon, the
+   * closest iMessage gets to a rich card (à la Slack Block Kit) instead of a
+   * bare link. Not part of the Chat SDK `Adapter` interface — exposed as an
+   * adapter-specific extra. Remote only.
+   *
+   * Two forms:
+   *
+   * - **Just a URL** — pass a string (or a `Promise`/thunk resolving to one, so
+   *   the link can be minted at send time). This is the lightweight `app(url)`
+   *   card: the URL is rendered as a mini-app with no extension identifiers
+   *   required.
+   * - **A full {@link MiniAppCard}** — pass an object to control the bubble's
+   *   image, captions, and the exact iMessage extension that opens on tap. Its
+   *   `appName`, `teamId`, and `extensionBundleId` identify that extension.
+   */
+  async sendMiniApp(threadId: string, url: AppUrl): Promise<RawMessage>;
+  async sendMiniApp(threadId: string, card: MiniAppCard): Promise<RawMessage>;
+  async sendMiniApp(
+    threadId: string,
+    input: MiniAppCard | AppUrl
+  ): Promise<RawMessage> {
+    if (this.local) {
+      throw new NotImplementedError(
+        "sendMiniApp is not supported in local mode",
+        "sendMiniApp"
+      );
+    }
+
+    const space = await this.requireSpace(threadId, "sendMiniApp");
+    const content = isAppUrl(input)
+      ? appContent(input)
+      : customizedMiniApp(await resolveMiniApp(input));
+    const sent = await space.send(content);
+    if (!sent) {
+      throw new ValidationError(
+        "imessage",
+        "sendMiniApp could not send the card"
       );
     }
 
