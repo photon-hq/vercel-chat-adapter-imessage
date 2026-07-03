@@ -16,8 +16,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup",
-    "dev": "tsup --watch",
+    "build": "tsdown",
+    "dev": "tsdown --watch",
     "test": "vitest run --coverage",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
@@ -40,8 +40,8 @@
     "@vitest/coverage-v8": "^4.1.9",
     "chat": "^4.32.0",
     "clean-publish": "^7.1.0",
-    "tsup": "^8.5.1",
-    "typescript": "^5.9.3",
+    "tsdown": "^0.22.3",
+    "typescript": "^6.0.3",
     "ultracite": "7.8.4",
     "vitest": "^4.1.9"
   },
