@@ -138,15 +138,15 @@ export async function POST(request: Request): Promise<Response> {
 
 ### Replying
 
-A webhook delivery carries no live connection, but your bot can still respond: for a **DM**, the adapter rebuilds the thread from its address and sends, reacts, edits, and shows typing over spectrum-ts (gRPC) — no gateway needed.
+A webhook delivery carries no live connection, but your bot can still respond: the adapter rebuilds the thread — **DM or group** — from its chat GUID via spectrum-ts's `space.get` and sends, reacts, edits, and shows typing — no gateway needed.
 
 ```typescript
 bot.onNewMention(async (thread, message) => {
-  await thread.post("Got it!"); // works directly from a webhook delivery (DM)
+  await thread.post("Got it!"); // works directly from a webhook delivery
 });
 ```
 
-Replying into a **group** still requires that group to have been received over the [gateway listener](#gateway-setup-for-serverless) in the same session — an unseen group can't be reconstructed from its id (see [Limitations](#limitations)).
+The rebuild needs spectrum-ts to know which iMessage line the chat belongs to; with **multiple lines** configured, an unseen thread can't be resolved and the adapter throws `NotImplementedError` — respond within a thread received over the [gateway listener](#gateway-setup-for-serverless) instead (see [Limitations](#limitations)).
 
 ## Gateway setup for serverless
 
@@ -314,11 +314,11 @@ iMessage uses tapbacks instead of emoji reactions. The adapter maps standard emo
 
 ## Limitations
 
-- **DMs send cold; groups are session-bound.** For a **DM**, the adapter rebuilds the thread from its address via spectrum-ts (gRPC), so it can send, react, edit, and show typing even into a thread it hasn't seen this session — including a [webhook](#webhooks) delivery. A **group** chat has no by-id resolver, so addressing one requires it to have been received over the gateway/stream in the current session; cold sends to an unseen group throw `NotImplementedError`. (Local mode cannot create spaces at all — it only replies to received messages.)
+- **Cold sends need a resolvable line.** The adapter rebuilds a thread — DM or group — from its chat GUID via spectrum-ts's `space.get`, so it can send, react, edit, and show typing even into a thread it hasn't seen this session, including a [webhook](#webhooks) delivery. With **multiple iMessage lines** configured, spectrum-ts cannot infer which line an unseen chat belongs to, so cold sends there throw `NotImplementedError` — respond within a received message's thread instead.
 - **No message history.** `fetchMessages` is not supported — spectrum-ts exposes no paginated history API.
 - **No thread/chat info.** `fetchThread` is not supported.
 - **No reaction removal.** `removeReaction` is not supported.
-- **Local mode** supports sending and receiving (reply to an inbound message), but not reactions, typing, editing, modals, history, or thread info.
+- **Local mode** supports sending (including cold sends by chat GUID) and receiving, but not reactions, typing, editing, modals, history, or thread info.
 - **Formatting.** iMessage is plain-text only; Markdown formatting is stripped when sending, preserving the text content.
 - **Platform.** Local mode requires macOS. Cloud and self-host run anywhere.
 - **Cards.** iMessage has no structured card layouts.
@@ -330,7 +330,7 @@ This version re-platforms the adapter onto **spectrum-ts**. If you are upgrading
 - **Dependency** — replaces `@photon-ai/imessage-kit` + `@photon-ai/advanced-imessage-kit` with `spectrum-ts`.
 - **`IMESSAGE_SERVER_URL` is now a gRPC `host:port`** (self-host), not an `https://` / Socket.IO URL.
 - **New cloud path** — set `IMESSAGE_PROJECT_ID` + `IMESSAGE_PROJECT_SECRET` for Spectrum Cloud.
-- **Removed capabilities** (now `NotImplementedError`): `fetchMessages`, `fetchThread`, `removeReaction`, and cold `postMessage` to an unseen **group** thread (DMs are rebuilt from their address over gRPC — see [Limitations](#limitations)). Local `fetchMessages` (previously supported) is also removed.
+- **Removed capabilities** (now `NotImplementedError`): `fetchMessages`, `fetchThread`, and `removeReaction`. Local `fetchMessages` (previously supported) is also removed. Cold `postMessage` works for DMs and groups alike (rebuilt from the chat GUID — see [Limitations](#limitations)).
 - **`adapter.sdk` → `adapter.app`** — the adapter now exposes the underlying `SpectrumInstance` as `adapter.app` (null until `initialize()`).
 
 ## Troubleshooting

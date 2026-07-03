@@ -33,7 +33,6 @@ import { ModalPollRegistry } from "./internal/modals";
 import { emojiToGlyph, fileToAttachment } from "./internal/outbound";
 import {
   decodeThreadId,
-  dmAddressFromChatGuid,
   encodeThreadId,
   isDMChatGuid,
 } from "./internal/thread";
@@ -152,9 +151,9 @@ export class iMessageAdapter implements Adapter {
    * Handle a Spectrum Cloud webhook delivery (signed JSON `messages` event).
    *
    * Verifies the `X-Spectrum-Signature` HMAC, then routes the message into the
-   * Chat SDK. Webhook deliveries are receive-only: a delivered thread has no
-   * live spectrum-ts `Space`, so replying/reacting still requires the gateway
-   * stream (see `startGatewayListener`).
+   * Chat SDK. A delivered thread has no live spectrum-ts `Space`, but the
+   * adapter rebuilds one from the chat GUID on demand (see `resolveSpace`), so
+   * replying works directly from a webhook delivery.
    *
    * @see https://photon.codes/docs/webhooks/overview
    */
@@ -585,11 +584,12 @@ export class iMessageAdapter implements Adapter {
    *
    * Prefers a live `Space` cached from the inbound stream (correct sending
    * line, no extra round-trip). On a miss — e.g. a webhook-only deployment, or
-   * a cold send — it reconstructs the Space over gRPC via
-   * `imessage(app).space([address])`. Only DMs can be rebuilt from a chatGuid:
-   * the resolver derives them from the peer address, whereas an unseen group
-   * has no by-id resolver (passing participants would create a *new* chat).
-   * Returns `undefined` when no Space can be obtained.
+   * a cold send — it rebuilds the Space from the chat GUID via
+   * `imessage(app).space.get(chatGuid)`, which works for DMs and groups alike.
+   * The rebuild can still fail when several iMessage lines are configured and
+   * spectrum-ts cannot infer which line the chat belongs to (`space.get`
+   * requires `params.phone` there). Returns `undefined` when no Space can be
+   * obtained.
    */
   private async resolveSpace(
     threadId: string,
@@ -599,21 +599,25 @@ export class iMessageAdapter implements Adapter {
     if (cached) {
       return cached;
     }
-    if (!this.app || this.local || !isDMChatGuid(chatGuid)) {
-      return;
-    }
-    const address = dmAddressFromChatGuid(chatGuid);
-    if (!address) {
+    if (!this.app) {
       return;
     }
     // `HasProvider` over the default provider tuple won't narrow to `true`, so
     // the call types as `never`; cast to the slice of the instance we use.
     const platform = imessage(this.app) as unknown as {
-      space(users: string[]): Promise<SpectrumSpace>;
+      space: { get(id: string): Promise<SpectrumSpace> };
     };
-    const space = await platform.space([address]);
-    this.cache.rememberSpace(space);
-    return space;
+    try {
+      const space = await platform.space.get(chatGuid);
+      this.cache.rememberSpace(space);
+      return space;
+    } catch (error) {
+      this.logger.debug("Could not rebuild Space from chat GUID", {
+        chatGuid,
+        error: String(error),
+      });
+      return;
+    }
   }
 
   private async requireSpace(
@@ -623,9 +627,10 @@ export class iMessageAdapter implements Adapter {
     const space = await this.resolveSpace(threadId);
     if (!space) {
       throw new NotImplementedError(
-        `${action} requires a DM thread (rebuilt from its address) or a group ` +
-          "received in this session; spectrum-ts cannot reconstruct an unseen " +
-          "group chat from its id. Respond within a received message's thread instead.",
+        `${action} could not resolve this thread. With multiple iMessage ` +
+          "lines configured, spectrum-ts needs the chat's sending line to " +
+          "rebuild an unseen thread. Respond within a received message's " +
+          "thread instead.",
         action,
       );
     }

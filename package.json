@@ -31,7 +31,7 @@
   "dependencies": {
     "@chat-adapter/shared": "^4.15.0",
     "mime-types": "^3.0.1",
-    "spectrum-ts": "^1.18.0"
+    "spectrum-ts": "^8.2.1"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.12",
