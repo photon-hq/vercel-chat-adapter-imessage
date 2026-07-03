@@ -123,12 +123,14 @@ interface MockSpace {
   edit: ReturnType<typeof vi.fn>;
   getMessage: ReturnType<typeof vi.fn>;
   id: string;
+  read: ReturnType<typeof vi.fn>;
   rename: ReturnType<typeof vi.fn>;
   responding: ReturnType<typeof vi.fn>;
   send: ReturnType<typeof vi.fn>;
   startTyping: ReturnType<typeof vi.fn>;
   stopTyping: ReturnType<typeof vi.fn>;
   type: "dm" | "group";
+  unsend: ReturnType<typeof vi.fn>;
 }
 
 interface MockMessage {
@@ -138,10 +140,12 @@ interface MockMessage {
   id: string;
   platform: string;
   react: ReturnType<typeof vi.fn>;
+  read: ReturnType<typeof vi.fn>;
   reply: ReturnType<typeof vi.fn>;
   sender: { id: string; __platform: string } | undefined;
   space: MockSpace;
   timestamp: Date;
+  unsend: ReturnType<typeof vi.fn>;
 }
 
 let mockApp: ReturnType<typeof createMockApp>["app"];
@@ -226,6 +230,8 @@ function makeSpace(
     startTyping: vi.fn(async () => undefined),
     stopTyping: vi.fn(async () => undefined),
     edit: vi.fn(async () => undefined),
+    unsend: vi.fn(async () => undefined),
+    read: vi.fn(async () => undefined),
     responding: vi.fn(async (fn: () => unknown) => fn()),
     rename: vi.fn(),
     avatar: vi.fn(),
@@ -254,10 +260,25 @@ function makeMessage(
     timestamp: opts.timestamp ?? new Date("2026-01-15T12:00:00Z"),
     platform: "iMessage",
     direction: opts.direction ?? "inbound",
-    react: vi.fn(async () => undefined),
+    react: vi.fn(async () => makeReaction(`reaction-of-${id}`, space)),
     reply: vi.fn(async () => undefined),
     edit: vi.fn(async () => undefined),
+    unsend: vi.fn(async () => undefined),
+    read: vi.fn(async () => undefined),
   };
+}
+
+/**
+ * A tapback reaction message — what spectrum-ts's `message.react()` resolves
+ * to. `addReaction` keeps this so `removeReaction` can `unsend()` it.
+ */
+function makeReaction(id: string, space: MockSpace): MockMessage {
+  return makeMessage(
+    id,
+    space,
+    { type: "reaction" },
+    { direction: "outbound" }
+  );
 }
 
 function cloudAdapter(): iMessageAdapter {
@@ -399,6 +420,11 @@ beforeEach(() => {
     space: {
       get: vi.fn(async (id: string) =>
         makeSpace(id, id.includes(";-;") ? "dm" : "group")
+      ),
+      // `space.create(userId)` resolves/creates a 1:1 DM — a synthetic DM chat
+      // GUID for the handle, which `openDM` encodes into a thread id.
+      create: vi.fn(async (userId: string) =>
+        makeSpace(`iMessage;-;${userId}`, "dm")
       ),
     },
   }));
@@ -1029,12 +1055,152 @@ describe("addReaction / removeReaction", () => {
     ).rejects.toThrow('Unsupported iMessage tapback: "fire"');
   });
 
-  it("removeReaction always throws NotImplementedError", async () => {
+  it("throws NotImplementedError in local mode for removeReaction", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
+    await expect(
+      adapter.removeReaction("imessage:iMessage;-;+1234567890", "m1", "laugh")
+    ).rejects.toThrow("removeReaction is not supported in local mode");
+  });
+
+  it("removes a reaction added earlier this session by unsending it", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { message } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      messageId: "msg-001",
+    });
+    const reaction = makeReaction("reaction-1", message.space);
+    message.react.mockResolvedValueOnce(reaction);
+
+    await adapter.addReaction(
+      "imessage:iMessage;-;+1234567890",
+      "msg-001",
+      "heart"
+    );
+    await adapter.removeReaction(
+      "imessage:iMessage;-;+1234567890",
+      "msg-001",
+      "heart"
+    );
+
+    expect(reaction.unsend).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws when the reaction was not added in this session", async () => {
     const adapter = cloudAdapter();
     await init(adapter);
     await expect(
       adapter.removeReaction("imessage:iMessage;-;+1234567890", "m1", "laugh")
     ).rejects.toThrow(NotImplementedError);
+  });
+
+  it("throws for an unsupported emoji on removeReaction", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await expect(
+      adapter.removeReaction("imessage:iMessage;-;+1234567890", "m1", "fire")
+    ).rejects.toThrow('Unsupported iMessage tapback: "fire"');
+  });
+});
+
+describe("deleteMessage", () => {
+  it("throws NotImplementedError in local mode", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
+    await expect(
+      adapter.deleteMessage("imessage:iMessage;-;+1234567890", "m1")
+    ).rejects.toThrow("deleteMessage is not supported in local mode");
+  });
+
+  it("unsends a message resolved from the session cache", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { message } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      messageId: "msg-del-1",
+    });
+
+    await adapter.deleteMessage("imessage:iMessage;-;+1234567890", "msg-del-1");
+    expect(message.unsend).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws when the target message can't be resolved", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    // No matching line for an unseen chat with getMessage returning undefined.
+    mockImessage.mockImplementation(() => ({
+      space: {
+        get: vi.fn(async (id: string) => {
+          const space = makeSpace(id, "dm");
+          space.getMessage.mockResolvedValue(undefined);
+          return space;
+        }),
+      },
+    }));
+    await expect(
+      adapter.deleteMessage("imessage:iMessage;-;+1999999999", "missing")
+    ).rejects.toThrow(NotImplementedError);
+  });
+});
+
+describe("markRead", () => {
+  it("throws NotImplementedError in local mode", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
+    await expect(
+      adapter.markRead("imessage:iMessage;-;+1234567890", "m1")
+    ).rejects.toThrow("markRead is not supported in local mode");
+  });
+
+  it("marks a received message as read", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { message } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      messageId: "msg-read-1",
+    });
+
+    await adapter.markRead("imessage:iMessage;-;+1234567890", "msg-read-1");
+    expect(message.read).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("openDM", () => {
+  it("resolves a DM thread id from a handle", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+
+    const threadId = await adapter.openDM("+15551234567");
+    expect(threadId).toBe("imessage:iMessage;-;+15551234567");
+  });
+
+  it("posting into an opened DM reuses the resolved space", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+
+    const created = makeSpace("iMessage;-;+15551234567", "dm", {
+      id: "dm-sent-1",
+    });
+    mockImessage.mockImplementation(() => ({
+      space: {
+        get: vi.fn(async () => {
+          throw new Error("should not rebuild — the created space is cached");
+        }),
+        create: vi.fn(async () => created),
+      },
+    }));
+
+    const threadId = await adapter.openDM("+15551234567");
+    await adapter.postMessage(threadId, "hi there");
+    expect(created.send).toHaveBeenCalled();
+  });
+
+  it("throws when the adapter is not initialized", async () => {
+    const adapter = cloudAdapter();
+    await expect(adapter.openDM("+15551234567")).rejects.toThrow(
+      NotImplementedError
+    );
   });
 });
 
@@ -1061,6 +1227,45 @@ describe("startTyping", () => {
 
     vi.advanceTimersByTime(3000);
     expect(space.stopTyping).toHaveBeenCalled();
+  });
+});
+
+describe("fetchMessage", () => {
+  it("returns a parsed message resolved from the session cache", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      messageId: "msg-fetch-1",
+      content: { type: "text", text: "cached hello" },
+    });
+
+    const message = await adapter.fetchMessage(
+      "imessage:iMessage;-;+1234567890",
+      "msg-fetch-1"
+    );
+    expect(message?.id).toBe("msg-fetch-1");
+    expect(message?.text).toBe("cached hello");
+  });
+
+  it("returns null when the message can't be resolved", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    mockImessage.mockImplementation(() => ({
+      space: {
+        get: vi.fn(async (id: string) => {
+          const space = makeSpace(id, "dm");
+          space.getMessage.mockResolvedValue(undefined);
+          return space;
+        }),
+      },
+    }));
+
+    const message = await adapter.fetchMessage(
+      "imessage:iMessage;-;+1999999999",
+      "missing"
+    );
+    expect(message).toBeNull();
   });
 });
 
