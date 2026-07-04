@@ -23,6 +23,7 @@ const { mockSpectrum, mockImessageConfig, mockImessage } = vi.hoisted(() => ({
 vi.mock("spectrum-ts", () => ({
   Spectrum: mockSpectrum,
   text: (t: string) => ({ __kind: "text", text: t }),
+  markdown: (m: string) => ({ __kind: "markdown", markdown: m }),
   attachment: (data: unknown, options: unknown) => ({
     __kind: "attachment",
     data,
@@ -33,10 +34,46 @@ vi.mock("spectrum-ts", () => ({
     title,
     options,
   }),
+  app: (url: unknown) => ({ __kind: "app", url }),
+  voice: (input: unknown, options: unknown) => ({
+    __kind: "voice",
+    input,
+    options,
+  }),
 }));
 
 vi.mock("spectrum-ts/providers/imessage", () => ({
-  imessage: Object.assign(mockImessage, { config: mockImessageConfig }),
+  imessage: Object.assign(mockImessage, {
+    config: mockImessageConfig,
+    effect: {
+      message: {
+        slam: "com.apple.MobileSMS.expressivesend.impact",
+        loud: "com.apple.MobileSMS.expressivesend.loud",
+        gentle: "com.apple.MobileSMS.expressivesend.gentle",
+        invisible: "com.apple.MobileSMS.expressivesend.invisibleink",
+        confetti: "com.apple.messages.effect.CKConfettiEffect",
+        fireworks: "com.apple.messages.effect.CKFireworksEffect",
+        balloons: "com.apple.messages.effect.CKBalloonEffect",
+        heart: "com.apple.messages.effect.CKHeartEffect",
+        lasers: "com.apple.messages.effect.CKLasersEffect",
+        celebration: "com.apple.messages.effect.CKHappyBirthdayEffect",
+        sparkles: "com.apple.messages.effect.CKSparklesEffect",
+        spotlight: "com.apple.messages.effect.CKSpotlightEffect",
+        echo: "com.apple.messages.effect.CKEchoEffect",
+      },
+    },
+  }),
+  effect: (content: unknown, messageEffect: string) => ({
+    __kind: "effect",
+    content,
+    effect: messageEffect,
+  }),
+  customizedMiniApp: (input: unknown) => ({ __kind: "mini-app", input }),
+  background: (input: unknown, options: unknown) => ({
+    __kind: "background",
+    input,
+    options,
+  }),
 }));
 
 vi.mock("chat", async (importOriginal) => {
@@ -912,6 +949,48 @@ describe("postMessage", () => {
     expect(result.threadId).toBe("imessage:iMessage;-;+1234567890");
   });
 
+  it("sends markdown-typed content as native markdown (styled on remote iMessage)", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      sendResult: { id: "remote-msg-md" },
+    });
+
+    const result = await adapter.postMessage(
+      "imessage:iMessage;-;+1234567890",
+      {
+        markdown: "**bold** and _italic_",
+      }
+    );
+
+    // Markdown source is preserved verbatim and sent via spectrum's markdown()
+    // builder rather than stripped to plain text.
+    expect(space.send).toHaveBeenCalledWith({
+      __kind: "markdown",
+      markdown: "**bold** and _italic_",
+    });
+    expect(result.id).toBe("remote-msg-md");
+  });
+
+  it("sends plain string content as text, leaving stray markers untouched", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      sendResult: { id: "remote-msg-raw" },
+    });
+
+    // A raw string is pass-through-as-is: `*` must NOT be reinterpreted as
+    // markdown, so it stays plain text().
+    await adapter.postMessage("imessage:iMessage;-;+1234567890", "2 * 3 = 6");
+
+    expect(space.send).toHaveBeenCalledWith({
+      __kind: "text",
+      text: "2 * 3 = 6",
+    });
+  });
+
   it("cold-sends to a DM not seen this session by rebuilding it from its chat GUID", async () => {
     const adapter = cloudAdapter();
     await init(adapter);
@@ -979,6 +1058,630 @@ describe("postMessage", () => {
   });
 });
 
+describe("sendEffect", () => {
+  it("wraps text with the resolved effect id (friendly name)", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      sendResult: { id: "effect-msg-1" },
+    });
+
+    const result = await adapter.sendEffect(
+      "imessage:iMessage;-;+1234567890",
+      "🎉 Task complete!",
+      "confetti"
+    );
+
+    expect(space.send).toHaveBeenCalledWith({
+      __kind: "effect",
+      content: { __kind: "text", text: "🎉 Task complete!" },
+      effect: "com.apple.messages.effect.CKConfettiEffect",
+    });
+    expect(result.id).toBe("effect-msg-1");
+    expect(result.threadId).toBe("imessage:iMessage;-;+1234567890");
+  });
+
+  it("accepts a raw spectrum-ts effect id", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.sendEffect(
+      "imessage:iMessage;-;+1234567890",
+      "boom",
+      "com.apple.MobileSMS.expressivesend.impact"
+    );
+
+    expect(space.send).toHaveBeenCalledWith({
+      __kind: "effect",
+      content: { __kind: "text", text: "boom" },
+      effect: "com.apple.MobileSMS.expressivesend.impact",
+    });
+  });
+
+  it("applies the effect to markdown-typed content", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.sendEffect(
+      "imessage:iMessage;-;+1234567890",
+      { markdown: "**done**" },
+      "fireworks"
+    );
+
+    expect(space.send).toHaveBeenCalledWith({
+      __kind: "effect",
+      content: { __kind: "markdown", markdown: "**done**" },
+      effect: "com.apple.messages.effect.CKFireworksEffect",
+    });
+  });
+
+  it("throws NotImplementedError in local mode", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
+    await expect(
+      adapter.sendEffect(
+        "imessage:iMessage;-;+1234567890",
+        "hooray",
+        "balloons"
+      )
+    ).rejects.toThrow("sendEffect is not supported in local mode");
+  });
+
+  it("throws ValidationError on an unknown effect", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(
+      adapter.sendEffect(
+        "imessage:iMessage;-;+1234567890",
+        "hi",
+        "sparkle" as never
+      )
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it("throws when there is no text to attach the effect to", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(
+      adapter.sendEffect("imessage:iMessage;-;+1234567890", "", "confetti")
+    ).rejects.toThrow("sendEffect requires non-empty text");
+  });
+});
+
+describe("sendMiniApp", () => {
+  const sampleCard = {
+    appName: "Poll Kit",
+    teamId: "TEAM123",
+    extensionBundleId: "com.example.pollkit.MessagesExtension",
+    url: "https://example.com/poll/42",
+    layout: {
+      caption: "Pizza night?",
+      subcaption: "Tap to vote",
+      summary: "Vote on Friday's dinner",
+    },
+  };
+
+  it("sends the lightweight app(url) card from a bare URL string", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      sendResult: { id: "app-url-1" },
+    });
+
+    const result = await adapter.sendMiniApp(
+      "imessage:iMessage;-;+1234567890",
+      "https://example.com/menu"
+    );
+
+    expect(space.send).toHaveBeenCalledWith({
+      __kind: "app",
+      url: "https://example.com/menu",
+    });
+    expect(result.id).toBe("app-url-1");
+  });
+
+  it("passes a thunk URL straight through to app()", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    const thunk = () => "https://example.com/signed";
+    await adapter.sendMiniApp("imessage:iMessage;-;+1234567890", thunk);
+
+    expect(space.send).toHaveBeenCalledWith({ __kind: "app", url: thunk });
+  });
+
+  it("sends a customized mini-app card via the cached Space", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      sendResult: { id: "mini-app-1" },
+    });
+
+    const result = await adapter.sendMiniApp(
+      "imessage:iMessage;-;+1234567890",
+      sampleCard
+    );
+
+    expect(space.send).toHaveBeenCalledWith({
+      __kind: "mini-app",
+      input: expect.objectContaining({
+        appName: "Poll Kit",
+        teamId: "TEAM123",
+        extensionBundleId: "com.example.pollkit.MessagesExtension",
+        url: "https://example.com/poll/42",
+        layout: expect.objectContaining({
+          caption: "Pizza night?",
+          subcaption: "Tap to vote",
+          summary: "Vote on Friday's dinner",
+        }),
+      }),
+    });
+    expect(result.id).toBe("mini-app-1");
+    expect(result.threadId).toBe("imessage:iMessage;-;+1234567890");
+  });
+
+  it("normalizes a URL instance and forwards appStoreId", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.sendMiniApp("imessage:iMessage;-;+1234567890", {
+      ...sampleCard,
+      url: new URL("https://example.com/poll/42"),
+      appStoreId: 123_456,
+    });
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      input: { url: string; appStoreId?: number };
+    };
+    expect(sent.input.url).toBe("https://example.com/poll/42");
+    expect(sent.input.appStoreId).toBe(123_456);
+  });
+
+  it("decodes a Blob image to bytes", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.sendMiniApp("imessage:iMessage;-;+1234567890", {
+      ...sampleCard,
+      layout: {
+        ...sampleCard.layout,
+        image: new Blob([new Uint8Array([1, 2, 3])]),
+      },
+    });
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      input: { layout: { image?: Uint8Array } };
+    };
+    expect(sent.input.layout.image).toBeInstanceOf(Uint8Array);
+    expect(Array.from(sent.input.layout.image ?? [])).toEqual([1, 2, 3]);
+  });
+
+  it("copies raw bytes into a fresh, detached Uint8Array", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    const source = new Uint8Array([9, 8, 7]);
+    await adapter.sendMiniApp("imessage:iMessage;-;+1234567890", {
+      ...sampleCard,
+      layout: { image: source },
+    });
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      input: { layout: { image?: Uint8Array } };
+    };
+    // Same bytes, but a detached copy — not the caller's buffer.
+    expect(Array.from(sent.input.layout.image ?? [])).toEqual([9, 8, 7]);
+    expect(sent.input.layout.image).not.toBe(source);
+  });
+
+  it("throws NotImplementedError in local mode", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
+    await expect(
+      adapter.sendMiniApp("imessage:iMessage;-;+1234567890", sampleCard)
+    ).rejects.toThrow("sendMiniApp is not supported in local mode");
+  });
+
+  it("throws ValidationError on a missing required field", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(
+      adapter.sendMiniApp("imessage:iMessage;-;+1234567890", {
+        ...sampleCard,
+        teamId: "",
+      })
+    ).rejects.toThrow('Mini-app card requires a non-empty "teamId"');
+  });
+
+  it("throws ValidationError on an invalid url", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(
+      adapter.sendMiniApp("imessage:iMessage;-;+1234567890", {
+        ...sampleCard,
+        url: "not a url",
+      })
+    ).rejects.toThrow("invalid url");
+  });
+});
+
+describe("sendVoice", () => {
+  const THREAD = "imessage:iMessage;-;+1234567890";
+
+  it("sends raw bytes as a voice note with an explicit MIME type", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      sendResult: { id: "voice-1" },
+    });
+
+    const result = await adapter.sendVoice(THREAD, new Uint8Array([1, 2, 3]), {
+      mimeType: "audio/mp4",
+      duration: 4,
+    });
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      __kind: string;
+      input: Buffer;
+      options: { mimeType: string; duration?: number };
+    };
+    expect(sent.__kind).toBe("voice");
+    expect(Buffer.isBuffer(sent.input)).toBe(true);
+    expect(Array.from(sent.input)).toEqual([1, 2, 3]);
+    expect(sent.options.mimeType).toBe("audio/mp4");
+    expect(sent.options.duration).toBe(4);
+    expect(result.id).toBe("voice-1");
+    expect(result.threadId).toBe(THREAD);
+  });
+
+  it("copies raw bytes into a fresh, detached Buffer", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    const source = new Uint8Array([9, 8, 7]);
+    await adapter.sendVoice(THREAD, source, { mimeType: "audio/mp4" });
+
+    const sent = space.send.mock.calls[0]?.[0] as { input: Buffer };
+    expect(Array.from(sent.input)).toEqual([9, 8, 7]);
+    expect(sent.input.buffer).not.toBe(source.buffer);
+  });
+
+  it("infers an audio MIME type from an audio file name", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.sendVoice(THREAD, new Uint8Array([1]), {
+      name: "reply.m4a",
+    });
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      options: { mimeType: string; name?: string };
+    };
+    expect(sent.options.mimeType).toBe("audio/mp4");
+    expect(sent.options.name).toBe("reply.m4a");
+  });
+
+  it("decodes a Blob and takes its MIME type", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.sendVoice(
+      THREAD,
+      new Blob([new Uint8Array([4, 5, 6])], { type: "audio/aac" })
+    );
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      input: Buffer;
+      options: { mimeType: string };
+    };
+    expect(Array.from(sent.input)).toEqual([4, 5, 6]);
+    expect(sent.options.mimeType).toBe("audio/aac");
+  });
+
+  it("unwraps a Chat SDK FileUpload's data and metadata", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.sendVoice(THREAD, {
+      data: Buffer.from([7, 7]),
+      filename: "note.m4a",
+      mimeType: "audio/mp4",
+    } as never);
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      input: Buffer;
+      options: { mimeType: string; name?: string };
+    };
+    expect(Array.from(sent.input)).toEqual([7, 7]);
+    expect(sent.options.mimeType).toBe("audio/mp4");
+    expect(sent.options.name).toBe("note.m4a");
+  });
+
+  it("passes an http(s) URL through to voice() for send-time fetch", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.sendVoice(THREAD, "https://example.com/speech.mp3");
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      __kind: string;
+      input: URL;
+    };
+    expect(sent.__kind).toBe("voice");
+    expect(sent.input).toBeInstanceOf(URL);
+    expect(sent.input.href).toBe("https://example.com/speech.mp3");
+  });
+
+  it("throws NotImplementedError in local mode", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
+    await expect(
+      adapter.sendVoice(THREAD, new Uint8Array([1]), { mimeType: "audio/mp4" })
+    ).rejects.toThrow("sendVoice is not supported in local mode");
+  });
+
+  it("throws ValidationError when the MIME type can't be resolved", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(
+      adapter.sendVoice(THREAD, new Uint8Array([1]))
+    ).rejects.toThrow("requires an audio/* MIME type");
+  });
+
+  it("throws ValidationError on a non-audio MIME type", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(
+      adapter.sendVoice(THREAD, new Uint8Array([1]), { mimeType: "video/mp4" })
+    ).rejects.toThrow('audio/* MIME type, got "video/mp4"');
+  });
+
+  it("throws ValidationError on a non-http(s) string input", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(adapter.sendVoice(THREAD, "not a url")).rejects.toThrow(
+      "must be an http(s) URL"
+    );
+  });
+});
+
+describe("setBackground", () => {
+  const THREAD = "imessage:iMessage;-;+1234567890";
+
+  it("sets the background from raw bytes with an explicit MIME type", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    const result = await adapter.setBackground(
+      THREAD,
+      new Uint8Array([1, 2, 3]),
+      {
+        mimeType: "image/jpeg",
+      }
+    );
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      __kind: string;
+      input: Buffer;
+      options: { mimeType: string };
+    };
+    expect(sent.__kind).toBe("background");
+    expect(Buffer.isBuffer(sent.input)).toBe(true);
+    expect(Array.from(sent.input)).toEqual([1, 2, 3]);
+    expect(sent.options.mimeType).toBe("image/jpeg");
+    // Fire-and-forget: no message id surfaced.
+    expect(result).toBeUndefined();
+  });
+
+  it("copies raw bytes into a fresh, detached Buffer", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    const source = new Uint8Array([9, 8, 7]);
+    await adapter.setBackground(THREAD, source, { mimeType: "image/png" });
+
+    const sent = space.send.mock.calls[0]?.[0] as { input: Buffer };
+    expect(Array.from(sent.input)).toEqual([9, 8, 7]);
+    expect(sent.input.buffer).not.toBe(source.buffer);
+  });
+
+  it("infers an image MIME type from an image file name", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.setBackground(THREAD, new Uint8Array([1]), {
+      name: "wallpaper.png",
+    });
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      options: { mimeType: string };
+    };
+    expect(sent.options.mimeType).toBe("image/png");
+  });
+
+  it("decodes a Blob and takes its MIME type", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.setBackground(
+      THREAD,
+      new Blob([new Uint8Array([4, 5, 6])], { type: "image/webp" })
+    );
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      input: Buffer;
+      options: { mimeType: string };
+    };
+    expect(Array.from(sent.input)).toEqual([4, 5, 6]);
+    expect(sent.options.mimeType).toBe("image/webp");
+  });
+
+  it("unwraps a Chat SDK FileUpload's data and metadata", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.setBackground(THREAD, {
+      data: Buffer.from([7, 7]),
+      filename: "bg.png",
+      mimeType: "image/png",
+    } as never);
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      input: Buffer;
+      options: { mimeType: string };
+    };
+    expect(Array.from(sent.input)).toEqual([7, 7]);
+    expect(sent.options.mimeType).toBe("image/png");
+  });
+
+  it('clears the background via the "clear" sentinel', async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.setBackground(THREAD, "clear");
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      __kind: string;
+      input: string;
+      options: unknown;
+    };
+    expect(sent.__kind).toBe("background");
+    expect(sent.input).toBe("clear");
+    expect(sent.options).toBeUndefined();
+  });
+
+  it("passes an http(s) URL through to background() for send-time fetch", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+    });
+
+    await adapter.setBackground(THREAD, "https://example.com/wallpaper.jpg");
+
+    const sent = space.send.mock.calls[0]?.[0] as {
+      __kind: string;
+      input: URL;
+      options: unknown;
+    };
+    expect(sent.__kind).toBe("background");
+    expect(sent.input).toBeInstanceOf(URL);
+    expect(sent.input.href).toBe("https://example.com/wallpaper.jpg");
+    expect(sent.options).toBeUndefined();
+  });
+
+  it("throws NotImplementedError in local mode", async () => {
+    const adapter = localAdapter();
+    await init(adapter);
+    await expect(
+      adapter.setBackground(THREAD, new Uint8Array([1]), {
+        mimeType: "image/png",
+      })
+    ).rejects.toThrow("setBackground is not supported in local mode");
+  });
+
+  it("throws ValidationError when the MIME type can't be resolved", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(
+      adapter.setBackground(THREAD, new Uint8Array([1]))
+    ).rejects.toThrow("requires an image/* MIME type");
+  });
+
+  it("throws ValidationError on a non-image MIME type", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(
+      adapter.setBackground(THREAD, new Uint8Array([1]), {
+        mimeType: "audio/mp4",
+      })
+    ).rejects.toThrow('image/* MIME type, got "audio/mp4"');
+  });
+
+  it("throws ValidationError on a non-http(s) string input", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    await primeInbound(adapter, { chatGuid: "iMessage;-;+1234567890" });
+
+    await expect(adapter.setBackground(THREAD, "./local.png")).rejects.toThrow(
+      "must be an http(s) URL"
+    );
+  });
+});
+
 describe("editMessage", () => {
   it("throws NotImplementedError in local mode", async () => {
     const adapter = localAdapter();
@@ -1007,6 +1710,26 @@ describe("editMessage", () => {
       text: "Updated text",
     });
     expect(result.id).toBe("msg-guid-001");
+  });
+
+  it("edits with markdown-typed content as native markdown", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { message } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      messageId: "msg-guid-md",
+    });
+
+    await adapter.editMessage(
+      "imessage:iMessage;-;+1234567890",
+      "msg-guid-md",
+      { markdown: "**updated**" }
+    );
+
+    expect(message.edit).toHaveBeenCalledWith({
+      __kind: "markdown",
+      markdown: "**updated**",
+    });
   });
 
   it("throws NotImplementedError when the message was not seen this session", async () => {

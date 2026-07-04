@@ -246,11 +246,15 @@ IMESSAGE_WEBHOOK_SECRET=whsec_...               # per-webhook signing secret
 | Message delete | Remote only (iMessage unsend window) |
 | Mark read | Remote only (`markRead`) |
 | Typing indicator | Remote only |
+| Message effects | Remote only (`sendEffect`) |
+| Mini-app cards | Remote only (`sendMiniApp`) |
+| Voice messages | Remote only (`sendVoice`) |
+| Chat background | Remote only (`setBackground`) |
 | Modals | Limited (Remote only) |
 | Fetch single message | Yes (`fetchMessage`) |
 | Message history | No |
 | Thread/chat info | No |
-| Cards | No |
+| Cards | Mini-app cards only (`sendMiniApp`) |
 | Streaming | No |
 | Ephemeral messages | No |
 | Webhooks | Yes (remote — Spectrum Cloud delivery) |
@@ -316,14 +320,100 @@ iMessage uses tapbacks instead of emoji reactions. The adapter maps standard emo
 | `emphasize` / `exclamation` | Emphasize |
 | `question` | Question |
 
+## Message effects
+
+iMessage expressive-send effects animate a message when it arrives. The adapter exposes them through `sendEffect(threadId, message, effect)` — an adapter-specific extra (there is no first-class Chat SDK slot for effects). It sends the text with the effect attached and returns the sent message. Remote only; local mode throws `NotImplementedError`.
+
+```typescript
+import { createiMessageAdapter, iMessageEffect } from "@photon-ai/chat-adapter-imessage";
+
+const adapter = createiMessageAdapter({ local: false });
+
+bot.onNewMention(async (thread) => {
+  // Friendly name…
+  await adapter.sendEffect(thread.id, "🎉 Task complete!", "confetti");
+  // …or the typed constant:
+  await adapter.sendEffect(thread.id, "🎉 Task complete!", iMessageEffect.confetti);
+});
+```
+
+The `effect` argument accepts a friendly name or a value from the re-exported `iMessageEffect` map. Full-screen effects: `confetti`, `fireworks`, `balloons`, `heart`, `lasers`, `celebration`, `sparkles`, `spotlight`, `echo`. Bubble effects: `slam`, `loud`, `gentle`, `invisible` (invisible ink). Effects attach to text only, so `sendEffect` requires non-empty text content; an unknown effect throws a `ValidationError`.
+
+## Mini-app cards
+
+Mini-app cards are native `MSMessageExtension` balloons — a rich card with a tap-through URL, the closest iMessage gets to a Slack-style rich card rather than a bare link. The adapter exposes them through `sendMiniApp(threadId, card)` — an adapter-specific extra (there is no first-class Chat SDK slot for cards). Remote only; local mode throws `NotImplementedError`.
+
+`sendMiniApp` takes **either** a bare URL **or** a fully-specified card.
+
+### Just a URL (`app(url)`)
+
+The lightweight form: pass a URL string and iMessage renders it as a mini-app — no extension identifiers required. You can also pass a `Promise<string>` or a thunk (`() => string | Promise<string>`), so the link can be minted at send time (e.g. a signed URL).
+
+```typescript
+import { createiMessageAdapter } from "@photon-ai/chat-adapter-imessage";
+
+const adapter = createiMessageAdapter({ local: false });
+
+bot.onNewMention(async (thread) => {
+  await adapter.sendMiniApp(thread.id, "https://example.com/menu");
+
+  // …or compute the URL lazily at send time:
+  await adapter.sendMiniApp(thread.id, async () => mintSignedLink(thread.id));
+});
+```
+
+### A full card (`customizedMiniApp`)
+
+Pass an object to control the bubble's image, captions, and the exact iMessage extension that opens on tap.
+
+```typescript
+await adapter.sendMiniApp(thread.id, {
+  appName: "Poll Kit",
+  teamId: "TEAM123",
+  extensionBundleId: "com.example.pollkit.MessagesExtension",
+  url: "https://example.com/poll/42",
+  appStoreId: 1_234_567, // optional — for recipients without the extension
+  layout: {
+    caption: "Pizza night?",
+    subcaption: "Tap to vote",
+    imageTitle: "Friday",
+    image: pngBytes, // Uint8Array | Buffer | ArrayBuffer | Blob | FileUpload
+    summary: "Vote on Friday's dinner",
+  },
+});
+```
+
+`appName`, `teamId`, and `extensionBundleId` identify the iMessage extension that opens (receiving `url`) when the recipient taps the card; the server builds the matching `MSMessageExtensionBalloonPlugin` id from `teamId` + `extensionBundleId`. Every `layout` field is optional. The `url` accepts a string or `URL` and is validated; a missing required field or an invalid URL throws a `ValidationError`.
+
+## Chat background
+
+iMessage lets a conversation carry its own wallpaper — a touch with no analog on the plain-text competitors. The adapter exposes it through `setBackground(threadId, input, options?)` — an adapter-specific extra (there is no first-class Chat SDK slot for it). It is fire-and-forget: iMessage acknowledges the control signal without returning a message, so the call resolves to `void`. Remote only; local mode throws `NotImplementedError`.
+
+```typescript
+import { readFile } from "node:fs/promises";
+
+// From image bytes (Uint8Array | Buffer | ArrayBuffer | Blob | FileUpload).
+await adapter.setBackground(thread.id, await readFile("./wallpaper.jpg"), {
+  mimeType: "image/jpeg",
+});
+
+// From an http(s) URL, fetched at send time.
+await adapter.setBackground(thread.id, "https://example.com/wallpaper.jpg");
+
+// Remove the current background.
+await adapter.setBackground(thread.id, "clear");
+```
+
+Pass the literal `"clear"` to remove the current background, in-memory image bytes, or an `http(s)` URL (a `URL` or a string) that spectrum-ts fetches at send time. Image bytes need an `image/*` MIME type — supply `options.mimeType` (e.g. `"image/jpeg"`) or an `options.name` with an image extension when it can't be inferred. Local file-path strings are rejected — read the file into bytes and pass those instead. A non-image MIME type, an unresolvable MIME type, or a non-`http(s)` string throws a `ValidationError`.
+
 ## Limitations
 
 - **Cold sends need a resolvable line.** The adapter rebuilds a thread — DM or group — from its chat GUID via spectrum-ts's `space.get`, so it can send, react, edit, and show typing even into a thread it hasn't seen this session, including a [webhook](#webhooks) delivery. With **multiple iMessage lines** configured, spectrum-ts cannot infer which line an unseen chat belongs to, so cold sends there throw `NotImplementedError` — respond within a received message's thread instead.
 - **No message history.** `fetchMessages` is not supported — spectrum-ts exposes no paginated history API. Single messages resolve via `fetchMessage` (from the session cache or spectrum-ts's by-id lookup).
 - **No thread/chat info.** `fetchThread` is not supported.
 - **Session-scoped delete & reaction removal.** `deleteMessage` unsends a message resolved from this session (subject to iMessage's ~2-minute unsend window); `removeReaction` retracts a tapback only if it was added via `addReaction` earlier in this session — spectrum-ts exposes no by-target reaction lookup.
-- **Local mode** supports sending (including cold sends by chat GUID), receiving, and opening DMs, but not reactions, typing, editing, deleting, marking read, modals, history, or thread info.
-- **Formatting.** iMessage is plain-text only; Markdown formatting is stripped when sending, preserving the text content.
+- **Local mode** supports sending (including cold sends by chat GUID), receiving, and opening DMs, but not reactions, typing, editing, deleting, marking read, effects, modals, history, or thread info.
+- **Formatting.** Markdown-typed content (`{ markdown }` or `{ ast }`) renders as native iMessage styled text on remote — bold, italics, links, and lists — via spectrum-ts's `markdown()` builder. Plain strings and `{ raw }` are sent as-is (never reinterpreted as Markdown). Inbound messages always surface as plain text.
 - **Platform.** Local mode requires macOS. Cloud and self-host run anywhere.
 - **Cards.** iMessage has no structured card layouts.
 

@@ -17,6 +17,10 @@ import type {
 } from "chat";
 import { NotImplementedError } from "chat";
 import {
+  type AppUrl,
+  app as appContent,
+  type ContentBuilder,
+  markdown as markdownContent,
   poll as pollContent,
   Spectrum,
   type SpectrumInstance,
@@ -24,8 +28,22 @@ import {
   type Space as SpectrumSpace,
   text as textContent,
 } from "spectrum-ts";
-import { imessage } from "spectrum-ts/providers/imessage";
+import {
+  customizedMiniApp,
+  effect as effectContent,
+  imessage,
+} from "spectrum-ts/providers/imessage";
+import {
+  type BackgroundInput,
+  type BackgroundOptions,
+  resolveBackground,
+} from "./background";
 import { type iMessageAdapterConfig, resolveSpectrumConfig } from "./config";
+import {
+  type IMessageMessageEffect,
+  type iMessageEffectName,
+  resolveEffect,
+} from "./effects";
 import { InboundCache } from "./internal/cache";
 import { MessagePump } from "./internal/gateway";
 import { buildChatMessage } from "./internal/inbound";
@@ -46,7 +64,9 @@ import {
   verifySpectrumSignature,
 } from "./internal/webhook";
 import { iMessageFormatConverter } from "./markdown";
+import { isAppUrl, type MiniAppCard, resolveMiniApp } from "./miniapp";
 import type { IMessageClientEntry, iMessageThreadId } from "./types";
+import { resolveVoice, type VoiceInput, type VoiceOptions } from "./voice";
 
 const TYPING_DURATION_MS = 3000;
 
@@ -216,17 +236,35 @@ export class iMessageAdapter implements Adapter {
     return new Response(null, { status: 200 });
   }
 
+  /**
+   * Build the spectrum content for an outbound message. Markdown-typed inputs
+   * are sent via `markdown()` so remote iMessage renders them as native styled
+   * text; raw/string/card inputs stay plain `text()`. Returns the rendered
+   * `body` too so callers can skip an empty send.
+   */
+  private toSpectrumContent(message: AdapterPostableMessage): {
+    body: string;
+    content: ContentBuilder;
+  } {
+    const { body, markdown } =
+      this.formatConverter.renderPostableContent(message);
+    return {
+      body,
+      content: markdown ? markdownContent(body) : textContent(body),
+    };
+  }
+
   async postMessage(
     threadId: string,
     message: AdapterPostableMessage
   ): Promise<RawMessage> {
     const space = await this.requireSpace(threadId, "postMessage");
-    const body = this.formatConverter.renderPostable(message);
+    const { body, content } = this.toSpectrumContent(message);
     const files = extractFiles(message);
 
     let first: SpectrumMessage | undefined;
     if (body && body.trim().length > 0) {
-      first = (await space.send(textContent(body))) ?? first;
+      first = (await space.send(content)) ?? first;
     }
     for (const file of files) {
       const sent =
@@ -242,6 +280,166 @@ export class iMessageAdapter implements Adapter {
     }
 
     return { id: first.id, threadId, raw: first };
+  }
+
+  /**
+   * Send a message with an iMessage expressive-send effect — a bubble effect
+   * (`slam`, `loud`, `gentle`, `invisible`) or a full-screen effect
+   * (`confetti`, `fireworks`, `balloons`, `heart`, `lasers`, `celebration`,
+   * `sparkles`, `spotlight`, `echo`). Not part of the Chat SDK `Adapter`
+   * interface — exposed as an adapter-specific extra (e.g. celebratory confetti
+   * on task completion). Remote only.
+   *
+   * The `effect` argument accepts a friendly name (`"confetti"`) or a value from
+   * the re-exported `iMessageEffect` map. Effects attach to text content only,
+   * so this requires non-empty text.
+   */
+  async sendEffect(
+    threadId: string,
+    message: AdapterPostableMessage,
+    effect: IMessageMessageEffect | iMessageEffectName
+  ): Promise<RawMessage> {
+    if (this.local) {
+      throw new NotImplementedError(
+        "sendEffect is not supported in local mode",
+        "sendEffect"
+      );
+    }
+
+    const space = await this.requireSpace(threadId, "sendEffect");
+    const { body, content } = this.toSpectrumContent(message);
+    if (!body || body.trim().length === 0) {
+      throw new ValidationError(
+        "imessage",
+        "sendEffect requires non-empty text content"
+      );
+    }
+
+    const effectId = resolveEffect(effect);
+    const sent = await space.send(effectContent(content, effectId));
+    if (!sent) {
+      throw new ValidationError(
+        "imessage",
+        "sendEffect could not send the message"
+      );
+    }
+
+    return { id: sent.id, threadId, raw: sent };
+  }
+
+  /**
+   * Send an iMessage mini-app card — an `MSMessageExtension` balloon, the
+   * closest iMessage gets to a rich card (à la Slack Block Kit) instead of a
+   * bare link. Not part of the Chat SDK `Adapter` interface — exposed as an
+   * adapter-specific extra. Remote only.
+   *
+   * Two forms:
+   *
+   * - **Just a URL** — pass a string (or a `Promise`/thunk resolving to one, so
+   *   the link can be minted at send time). This is the lightweight `app(url)`
+   *   card: the URL is rendered as a mini-app with no extension identifiers
+   *   required.
+   * - **A full {@link MiniAppCard}** — pass an object to control the bubble's
+   *   image, captions, and the exact iMessage extension that opens on tap. Its
+   *   `appName`, `teamId`, and `extensionBundleId` identify that extension.
+   */
+  async sendMiniApp(threadId: string, url: AppUrl): Promise<RawMessage>;
+  async sendMiniApp(threadId: string, card: MiniAppCard): Promise<RawMessage>;
+  async sendMiniApp(
+    threadId: string,
+    input: MiniAppCard | AppUrl
+  ): Promise<RawMessage> {
+    if (this.local) {
+      throw new NotImplementedError(
+        "sendMiniApp is not supported in local mode",
+        "sendMiniApp"
+      );
+    }
+
+    const space = await this.requireSpace(threadId, "sendMiniApp");
+    const content = isAppUrl(input)
+      ? appContent(input)
+      : customizedMiniApp(await resolveMiniApp(input));
+    const sent = await space.send(content);
+    if (!sent) {
+      throw new ValidationError(
+        "imessage",
+        "sendMiniApp could not send the card"
+      );
+    }
+
+    return { id: sent.id, threadId, raw: sent };
+  }
+
+  /**
+   * Send a native iMessage voice note — a real, playable waveform bubble (the
+   * message renders with `isAudioMessage`), not an audio file dropped in as an
+   * attachment. A natural fit for TTS-capable bots that reply with speech. Not
+   * part of the Chat SDK `Adapter` interface — exposed as an adapter-specific
+   * extra. Remote only.
+   *
+   * The `input` is either in-memory audio bytes (`Uint8Array` / `Buffer` /
+   * `ArrayBuffer`, a `Blob`, or a Chat SDK `FileUpload`) or an `http(s)` URL (a
+   * `URL` or a string) that is fetched at send time. Audio bytes need an
+   * `audio/*` MIME type — supply `options.mimeType` (e.g. `"audio/mp4"`) or an
+   * `options.name` with an audio extension when it can't be inferred.
+   */
+  async sendVoice(
+    threadId: string,
+    input: VoiceInput,
+    options?: VoiceOptions
+  ): Promise<RawMessage> {
+    if (this.local) {
+      throw new NotImplementedError(
+        "sendVoice is not supported in local mode",
+        "sendVoice"
+      );
+    }
+
+    const space = await this.requireSpace(threadId, "sendVoice");
+    const content = await resolveVoice(input, options);
+    const sent = await space.send(content);
+    if (!sent) {
+      throw new ValidationError(
+        "imessage",
+        "sendVoice could not send the voice message"
+      );
+    }
+
+    return { id: sent.id, threadId, raw: sent };
+  }
+
+  /**
+   * Set or clear the chat background — the wallpaper behind a conversation, an
+   * iMessage-only touch with no analog on the plain-text competitors. Not part
+   * of the Chat SDK `Adapter` interface — exposed as an adapter-specific extra.
+   * Remote only.
+   *
+   * The `input` is either the literal `"clear"` (to remove the current
+   * background), in-memory image bytes (`Uint8Array` / `Buffer` / `ArrayBuffer`,
+   * a `Blob`, or a Chat SDK `FileUpload`), or an `http(s)` URL (a `URL` or a
+   * string) that is fetched at send time. Image bytes need an `image/*` MIME
+   * type — supply `options.mimeType` (e.g. `"image/jpeg"`) or an `options.name`
+   * with an image extension when it can't be inferred.
+   *
+   * Fire-and-forget: iMessage acknowledges the control signal without returning
+   * a message, so this resolves to `void` rather than a {@link RawMessage}.
+   */
+  async setBackground(
+    threadId: string,
+    input: BackgroundInput,
+    options?: BackgroundOptions
+  ): Promise<void> {
+    if (this.local) {
+      throw new NotImplementedError(
+        "setBackground is not supported in local mode",
+        "setBackground"
+      );
+    }
+
+    const space = await this.requireSpace(threadId, "setBackground");
+    const content = await resolveBackground(input, options);
+    await space.send(content);
   }
 
   async editMessage(
@@ -264,9 +462,7 @@ export class iMessageAdapter implements Adapter {
       );
     }
 
-    await target.edit(
-      textContent(this.formatConverter.renderPostable(message))
-    );
+    await target.edit(this.toSpectrumContent(message).content);
     return { id: messageId, threadId, raw: target };
   }
 

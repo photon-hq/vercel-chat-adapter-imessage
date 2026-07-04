@@ -82,4 +82,33 @@ describe("iMessageFormatConverter", () => {
       expect(result).toBe("bold");
     });
   });
+
+  describe("renderPostableContent", () => {
+    it("preserves markdown source and flags it for native rendering", () => {
+      expect(
+        converter.renderPostableContent({ markdown: "**bold** _italic_" })
+      ).toEqual({ body: "**bold** _italic_", markdown: true });
+    });
+
+    it("stringifies AST content back to markdown source", () => {
+      const ast = converter.toAst("**bold**");
+      const result = converter.renderPostableContent({ ast });
+      expect(result.markdown).toBe(true);
+      expect(result.body).toContain("**bold**");
+    });
+
+    it("passes plain strings through as plain text", () => {
+      expect(converter.renderPostableContent("2 * 3")).toEqual({
+        body: "2 * 3",
+        markdown: false,
+      });
+    });
+
+    it("passes raw content through as plain text", () => {
+      expect(converter.renderPostableContent({ raw: "raw *text*" })).toEqual({
+        body: "raw *text*",
+        markdown: false,
+      });
+    });
+  });
 });
