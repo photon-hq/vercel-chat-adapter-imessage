@@ -9,7 +9,6 @@ export {
   type CreateiMessageAdapterOptions,
   deriveAddress,
   type iMessageAdapterConfig,
-  type iMessageAdapterLocalConfig,
   type iMessageAdapterRemoteConfig,
 } from "./config";
 export {

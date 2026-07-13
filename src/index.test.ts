@@ -1,13 +1,4 @@
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Mocks: spectrum-ts + its iMessage provider. Content builders are replaced
@@ -94,21 +85,6 @@ import { ValidationError } from "@chat-adapter/shared";
 import type { ModalElement } from "chat";
 import { NotImplementedError } from "chat";
 import { createiMessageAdapter, deriveAddress, iMessageAdapter } from "./index";
-
-// Local-mode construction requires macOS — pin the platform to `darwin` for the
-// whole suite so it runs on any CI OS. Platform-specific tests override locally.
-const REAL_PLATFORM = Object.getOwnPropertyDescriptor(process, "platform");
-beforeAll(() => {
-  Object.defineProperty(process, "platform", {
-    value: "darwin",
-    configurable: true,
-  });
-});
-afterAll(() => {
-  if (REAL_PLATFORM) {
-    Object.defineProperty(process, "platform", REAL_PLATFORM);
-  }
-});
 
 // Every gateway listener leaves a long `waitUntil` timer + a live message pump
 // running; track them so afterEach can abort and await termination.
@@ -405,10 +381,6 @@ function textMessagePayload(
   };
 }
 
-function localAdapter(): iMessageAdapter {
-  return new iMessageAdapter({ local: true, logger: mockLogger });
-}
-
 async function init(adapter: iMessageAdapter): Promise<void> {
   await adapter.initialize(mockChat as never);
 }
@@ -492,28 +464,24 @@ afterEach(async () => {
 
 describe("iMessageAdapter constructor", () => {
   it("has the correct name", () => {
-    expect(localAdapter().name).toBe("imessage");
+    expect(cloudAdapter().name).toBe("imessage");
   });
 
-  it("stores local mode config", () => {
-    const adapter = localAdapter();
-    expect(adapter.local).toBe(true);
-    expect(adapter.app).toBeNull();
+  it("starts with no app until initialized", () => {
+    expect(cloudAdapter().app).toBeNull();
   });
 
-  it("stores remote (self-host) config", () => {
+  it("stores self-host config", () => {
     const adapter = new iMessageAdapter({
-      local: false,
       logger: mockLogger,
       serverUrl: "grpc.example.com:443",
       apiKey: "test-key",
     });
-    expect(adapter.local).toBe(false);
     expect(adapter.serverUrl).toBe("grpc.example.com:443");
     expect(adapter.apiKey).toBe("test-key");
   });
 
-  it("stores remote (cloud) config", () => {
+  it("stores cloud config", () => {
     const adapter = cloudAdapter();
     expect(adapter.projectId).toBe("proj");
     expect(adapter.projectSecret).toBe("secret");
@@ -530,38 +498,18 @@ describe("iMessageAdapter constructor", () => {
     expect(adapter.webhookSecret).toBe("whsec_raw");
   });
 
-  it("throws on non-macOS platform in local mode", () => {
-    const original = process.platform;
-    Object.defineProperty(process, "platform", { value: "linux" });
-    try {
-      expect(() => localAdapter()).toThrow(
-        "iMessage adapter local mode requires macOS"
-      );
-    } finally {
-      Object.defineProperty(process, "platform", { value: original });
-    }
-  });
-
-  it("allows remote mode on non-macOS platforms", () => {
-    const original = process.platform;
-    Object.defineProperty(process, "platform", { value: "linux" });
-    try {
-      expect(cloudAdapter().local).toBe(false);
-    } finally {
-      Object.defineProperty(process, "platform", { value: original });
-    }
+  it("throws when the removed local mode is requested", () => {
+    expect(
+      () =>
+        new iMessageAdapter({
+          local: true,
+          logger: mockLogger,
+        } as never)
+    ).toThrow("Local (on-device) mode was removed");
   });
 });
 
 describe("initialize", () => {
-  it("builds a Spectrum instance with local provider config", async () => {
-    await init(localAdapter());
-    expect(mockImessageConfig).toHaveBeenCalledWith({ local: true });
-    expect(mockSpectrum).toHaveBeenCalledWith({
-      providers: [{ __providerConfig: { local: true } }],
-    });
-  });
-
   it("passes cloud credentials to Spectrum", async () => {
     await init(cloudAdapter());
     expect(mockImessageConfig).toHaveBeenCalledWith({});
@@ -598,7 +546,7 @@ describe("initialize", () => {
 
 describe("encodeThreadId / decodeThreadId / isDM", () => {
   it("encodes and decodes", () => {
-    const adapter = localAdapter();
+    const adapter = cloudAdapter();
     const threadId = adapter.encodeThreadId({
       chatGuid: "iMessage;-;+1234567890",
     });
@@ -609,7 +557,7 @@ describe("encodeThreadId / decodeThreadId / isDM", () => {
   });
 
   it("round-trips the sending line encoded in the thread ID", () => {
-    const adapter = localAdapter();
+    const adapter = cloudAdapter();
     const threadId = adapter.encodeThreadId({
       chatGuid: "iMessage;-;+1234567890",
       phone: "+15550001111",
@@ -623,24 +571,24 @@ describe("encodeThreadId / decodeThreadId / isDM", () => {
 
   it("decodes a legacy thread ID (no line) without a phone", () => {
     expect(
-      localAdapter().decodeThreadId("imessage:iMessage;-;+1234567890")
+      cloudAdapter().decodeThreadId("imessage:iMessage;-;+1234567890")
     ).toEqual({ chatGuid: "iMessage;-;+1234567890" });
   });
 
   it("throws on a thread ID from another adapter", () => {
-    expect(() => localAdapter().decodeThreadId("slack:C123")).toThrow(
+    expect(() => cloudAdapter().decodeThreadId("slack:C123")).toThrow(
       "Invalid iMessage thread ID"
     );
   });
 
   it("throws on an empty chat GUID", () => {
-    expect(() => localAdapter().decodeThreadId("imessage:")).toThrow(
+    expect(() => cloudAdapter().decodeThreadId("imessage:")).toThrow(
       "Invalid iMessage thread ID"
     );
   });
 
   it("detects DM vs group", () => {
-    const adapter = localAdapter();
+    const adapter = cloudAdapter();
     expect(adapter.isDM("imessage:iMessage;-;+1234567890")).toBe(true);
     expect(adapter.isDM("imessage:iMessage;+;chat493787071395575843")).toBe(
       false
@@ -651,18 +599,18 @@ describe("encodeThreadId / decodeThreadId / isDM", () => {
 
 describe("channelIdFromThreadId", () => {
   it("returns the thread ID unchanged", () => {
-    const adapter = localAdapter();
+    const adapter = cloudAdapter();
     expect(
       adapter.channelIdFromThreadId("imessage:iMessage;-;+1234567890")
     ).toBe("imessage:iMessage;-;+1234567890");
   });
 
   it("passes through an empty string", () => {
-    expect(localAdapter().channelIdFromThreadId("")).toBe("");
+    expect(cloudAdapter().channelIdFromThreadId("")).toBe("");
   });
 
   it("round-trips arbitrary values", () => {
-    const adapter = localAdapter();
+    const adapter = cloudAdapter();
     for (const id of [
       "imessage:iMessage;+;chat493787071395575843",
       "guid:ABC-123",
@@ -781,17 +729,6 @@ describe("handleWebhook", () => {
     expect(response.status).toBe(500);
   });
 
-  it("returns 501 in local mode", async () => {
-    const adapter = localAdapter();
-    await init(adapter);
-
-    const response = await adapter.handleWebhook(
-      new Request("https://example.com/webhook", { method: "POST", body: "{}" })
-    );
-
-    expect(response.status).toBe(501);
-  });
-
   it("returns 500 without a chat instance", async () => {
     const response = await webhookAdapter().handleWebhook(
       signedWebhookRequest({ body: textMessagePayload() })
@@ -841,6 +778,21 @@ describe("handleWebhook", () => {
     expect(mockChat.processMessage).not.toHaveBeenCalled();
   });
 
+  it("ignores group-event deliveries (rename, membership, avatar)", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    for (const type of ["rename", "addMember", "removeMember", "avatar"]) {
+      const response = await adapter.handleWebhook(
+        signedWebhookRequest({
+          body: textMessagePayload({ content: { type } }),
+        })
+      );
+      expect(response.status).toBe(200);
+    }
+    expect(mockChat.processMessage).not.toHaveBeenCalled();
+  });
+
   it("lets the bot reply to a webhook-delivered DM", async () => {
     const adapter = webhookAdapter();
     await init(adapter);
@@ -872,7 +824,7 @@ describe("handleWebhook", () => {
 
 describe("startGatewayListener", () => {
   it("returns 500 without a chat instance", async () => {
-    const response = await localAdapter().startGatewayListener({
+    const response = await cloudAdapter().startGatewayListener({
       waitUntil: vi.fn(),
     });
     expect(response.status).toBe(500);
@@ -880,7 +832,7 @@ describe("startGatewayListener", () => {
   });
 
   it("returns 500 without waitUntil", async () => {
-    const adapter = localAdapter();
+    const adapter = cloudAdapter();
     await init(adapter);
     const response = await adapter.startGatewayListener({});
     expect(response.status).toBe(500);
@@ -888,14 +840,14 @@ describe("startGatewayListener", () => {
   });
 
   it("starts listening and returns a success response", async () => {
-    const adapter = localAdapter();
+    const adapter = cloudAdapter();
     await init(adapter);
     const { response, waitUntil } = await startTrackedListener(adapter, 5000);
     expect(response.status).toBe(200);
     const body = (await response.json()) as Record<string, unknown>;
     expect(body.status).toBe("listening");
     expect(body.durationMs).toBe(5000);
-    expect(body.mode).toBe("local");
+    expect(body.mode).toBe("remote");
     expect(waitUntil).toHaveBeenCalledOnce();
   });
 
@@ -950,6 +902,32 @@ describe("startGatewayListener", () => {
       adapter,
       expect.any(String),
       expect.objectContaining({ text: "theirs" }),
+      expect.anything()
+    );
+  });
+
+  // spectrum-ts v9+ delivers group events (membership, rename, avatar) on
+  // app.messages — they must not surface to the bot as phantom messages.
+  it("ignores inbound group-event content (rename, membership, avatar)", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const space = makeSpace("chat-group-1", "group");
+    await startTrackedListener(adapter);
+
+    pushInbound([space, makeMessage("ev-1", space, { type: "rename" })]);
+    pushInbound([space, makeMessage("ev-2", space, { type: "addMember" })]);
+    pushInbound([space, makeMessage("ev-3", space, { type: "avatar" })]);
+    pushInbound([
+      space,
+      makeMessage("in-4", space, { type: "text", text: "real one" }),
+    ]);
+
+    await vi.waitFor(() => expect(mockChat.processMessage).toHaveBeenCalled());
+    expect(mockChat.processMessage).toHaveBeenCalledTimes(1);
+    expect(mockChat.processMessage).toHaveBeenCalledWith(
+      adapter,
+      expect.any(String),
+      expect.objectContaining({ text: "real one" }),
       expect.anything()
     );
   });
@@ -1221,18 +1199,6 @@ describe("sendEffect", () => {
     });
   });
 
-  it("throws NotImplementedError in local mode", async () => {
-    const adapter = localAdapter();
-    await init(adapter);
-    await expect(
-      adapter.sendEffect(
-        "imessage:iMessage;-;+1234567890",
-        "hooray",
-        "balloons"
-      )
-    ).rejects.toThrow("sendEffect is not supported in local mode");
-  });
-
   it("throws ValidationError on an unknown effect", async () => {
     const adapter = cloudAdapter();
     await init(adapter);
@@ -1398,14 +1364,6 @@ describe("sendMiniApp", () => {
     expect(sent.input.layout.image).not.toBe(source);
   });
 
-  it("throws NotImplementedError in local mode", async () => {
-    const adapter = localAdapter();
-    await init(adapter);
-    await expect(
-      adapter.sendMiniApp("imessage:iMessage;-;+1234567890", sampleCard)
-    ).rejects.toThrow("sendMiniApp is not supported in local mode");
-  });
-
   it("throws ValidationError on a missing required field", async () => {
     const adapter = cloudAdapter();
     await init(adapter);
@@ -1554,14 +1512,6 @@ describe("sendVoice", () => {
     expect(sent.__kind).toBe("voice");
     expect(sent.input).toBeInstanceOf(URL);
     expect(sent.input.href).toBe("https://example.com/speech.mp3");
-  });
-
-  it("throws NotImplementedError in local mode", async () => {
-    const adapter = localAdapter();
-    await init(adapter);
-    await expect(
-      adapter.sendVoice(THREAD, new Uint8Array([1]), { mimeType: "audio/mp4" })
-    ).rejects.toThrow("sendVoice is not supported in local mode");
   });
 
   it("throws ValidationError when the MIME type can't be resolved", async () => {
@@ -1738,16 +1688,6 @@ describe("setBackground", () => {
     expect(sent.options).toBeUndefined();
   });
 
-  it("throws NotImplementedError in local mode", async () => {
-    const adapter = localAdapter();
-    await init(adapter);
-    await expect(
-      adapter.setBackground(THREAD, new Uint8Array([1]), {
-        mimeType: "image/png",
-      })
-    ).rejects.toThrow("setBackground is not supported in local mode");
-  });
-
   it("throws ValidationError when the MIME type can't be resolved", async () => {
     const adapter = cloudAdapter();
     await init(adapter);
@@ -1782,14 +1722,6 @@ describe("setBackground", () => {
 });
 
 describe("editMessage", () => {
-  it("throws NotImplementedError in local mode", async () => {
-    const adapter = localAdapter();
-    await init(adapter);
-    await expect(
-      adapter.editMessage("imessage:iMessage;-;+1234567890", "m1", "x")
-    ).rejects.toThrow("editMessage is not supported in local mode");
-  });
-
   it("edits a cached message via spectrum-ts", async () => {
     const adapter = cloudAdapter();
     await init(adapter);
@@ -1841,14 +1773,6 @@ describe("editMessage", () => {
 });
 
 describe("addReaction / removeReaction", () => {
-  it("throws NotImplementedError in local mode for addReaction", async () => {
-    const adapter = localAdapter();
-    await init(adapter);
-    await expect(
-      adapter.addReaction("imessage:iMessage;-;+1234567890", "m1", "heart")
-    ).rejects.toThrow("addReaction is not supported in local mode");
-  });
-
   it("reacts with the mapped emoji glyph", async () => {
     const adapter = cloudAdapter();
     await init(adapter);
@@ -1875,14 +1799,6 @@ describe("addReaction / removeReaction", () => {
     await expect(
       adapter.addReaction("imessage:iMessage;-;+1234567890", "msg-001", "fire")
     ).rejects.toThrow('Unsupported iMessage tapback: "fire"');
-  });
-
-  it("throws NotImplementedError in local mode for removeReaction", async () => {
-    const adapter = localAdapter();
-    await init(adapter);
-    await expect(
-      adapter.removeReaction("imessage:iMessage;-;+1234567890", "m1", "laugh")
-    ).rejects.toThrow("removeReaction is not supported in local mode");
   });
 
   it("removes a reaction added earlier this session by unsending it", async () => {
@@ -1927,14 +1843,6 @@ describe("addReaction / removeReaction", () => {
 });
 
 describe("deleteMessage", () => {
-  it("throws NotImplementedError in local mode", async () => {
-    const adapter = localAdapter();
-    await init(adapter);
-    await expect(
-      adapter.deleteMessage("imessage:iMessage;-;+1234567890", "m1")
-    ).rejects.toThrow("deleteMessage is not supported in local mode");
-  });
-
   it("unsends a message resolved from the session cache", async () => {
     const adapter = cloudAdapter();
     await init(adapter);
@@ -1967,14 +1875,6 @@ describe("deleteMessage", () => {
 });
 
 describe("markRead", () => {
-  it("throws NotImplementedError in local mode", async () => {
-    const adapter = localAdapter();
-    await init(adapter);
-    await expect(
-      adapter.markRead("imessage:iMessage;-;+1234567890", "m1")
-    ).rejects.toThrow("markRead is not supported in local mode");
-  });
-
   it("marks a received message as read", async () => {
     const adapter = cloudAdapter();
     await init(adapter);
@@ -2030,14 +1930,6 @@ describe("openDM", () => {
 });
 
 describe("startTyping", () => {
-  it("throws NotImplementedError in local mode", async () => {
-    const adapter = localAdapter();
-    await init(adapter);
-    await expect(
-      adapter.startTyping("imessage:iMessage;-;+1234567890")
-    ).rejects.toThrow("startTyping is not supported in local mode");
-  });
-
   it("starts typing and auto-stops after 3s", async () => {
     const adapter = cloudAdapter();
     await init(adapter);
@@ -2176,14 +2068,6 @@ describe("openModal", () => {
       },
     ],
   };
-
-  it("throws NotImplementedError in local mode", async () => {
-    const adapter = localAdapter();
-    await init(adapter);
-    await expect(
-      adapter.openModal("imessage:iMessage;-;+1234567890", sampleModal)
-    ).rejects.toThrow("openModal is not supported in local mode");
-  });
 
   it("throws ValidationError when no Select child is present", async () => {
     const adapter = cloudAdapter();
@@ -2373,8 +2257,26 @@ describe("createiMessageAdapter", () => {
     vi.stubEnv("IMESSAGE_WEBHOOK_SECRET", undefined);
   });
 
-  it("defaults to local mode", () => {
-    expect(createiMessageAdapter().local).toBe(true);
+  it("throws when the removed local mode is requested explicitly", () => {
+    expect(() => createiMessageAdapter({ local: true })).toThrow(
+      "Local (on-device) mode was removed"
+    );
+  });
+
+  it("throws when the removed local mode is requested via IMESSAGE_LOCAL", () => {
+    vi.stubEnv("IMESSAGE_LOCAL", "true");
+    expect(() => createiMessageAdapter()).toThrow(
+      "Local (on-device) mode was removed"
+    );
+  });
+
+  it("accepts the legacy IMESSAGE_LOCAL=false opt-out as a no-op", () => {
+    vi.stubEnv("IMESSAGE_LOCAL", "false");
+    const adapter = createiMessageAdapter({
+      projectId: "p",
+      projectSecret: "s",
+    });
+    expect(adapter.projectId).toBe("p");
   });
 
   it("uses cloud credentials when provided", () => {
@@ -2383,7 +2285,6 @@ describe("createiMessageAdapter", () => {
       projectId: "p",
       projectSecret: "s",
     });
-    expect(adapter.local).toBe(false);
     expect(adapter.projectId).toBe("p");
   });
 
@@ -2397,21 +2298,19 @@ describe("createiMessageAdapter", () => {
     expect(adapter.apiKey).toBe("test-key");
   });
 
-  it("selects remote (cloud) from credentials without an explicit local flag", () => {
+  it("selects cloud from credentials without an explicit flag", () => {
     const adapter = createiMessageAdapter({
       projectId: "p",
       projectSecret: "s",
     });
-    expect(adapter.local).toBe(false);
     expect(adapter.projectId).toBe("p");
   });
 
-  it("selects remote (self-host) from serverUrl + apiKey without an explicit local flag", () => {
+  it("selects self-host from serverUrl + apiKey without an explicit flag", () => {
     const adapter = createiMessageAdapter({
       serverUrl: "grpc.example.com:443",
       apiKey: "k",
     });
-    expect(adapter.local).toBe(false);
     expect(adapter.serverUrl).toBe("grpc.example.com:443");
   });
 
@@ -2426,11 +2325,9 @@ describe("createiMessageAdapter", () => {
   });
 
   it("reads cloud creds from env", () => {
-    vi.stubEnv("IMESSAGE_LOCAL", "false");
     vi.stubEnv("IMESSAGE_PROJECT_ID", "env-proj");
     vi.stubEnv("IMESSAGE_PROJECT_SECRET", "env-secret");
     const adapter = createiMessageAdapter();
-    expect(adapter.local).toBe(false);
     expect(adapter.projectId).toBe("env-proj");
   });
 
@@ -2457,14 +2354,14 @@ describe("createiMessageAdapter", () => {
       ValidationError
     );
     expect(() => createiMessageAdapter({ local: false })).toThrow(
-      "serverUrl is required when local is false"
+      "serverUrl is required"
     );
   });
 
   it("throws when self-host serverUrl is set without apiKey", () => {
     expect(() =>
       createiMessageAdapter({ local: false, serverUrl: "grpc.example.com:443" })
-    ).toThrow("apiKey is required when local is false");
+    ).toThrow("apiKey is required");
   });
 
   it("prefers config values over env vars", () => {
@@ -2480,20 +2377,20 @@ describe("createiMessageAdapter", () => {
 
   it("treats an empty clients array as missing config", () => {
     expect(() => createiMessageAdapter({ local: false, clients: [] })).toThrow(
-      "serverUrl is required when local is false"
+      "serverUrl is required"
     );
   });
 
   it("treats whitespace-only serverUrl/apiKey as missing", () => {
     expect(() =>
       createiMessageAdapter({ local: false, serverUrl: "   " })
-    ).toThrow("serverUrl is required when local is false");
+    ).toThrow("serverUrl is required");
     expect(() =>
       createiMessageAdapter({
         local: false,
         serverUrl: "grpc.example.com:443",
         apiKey: "   ",
       })
-    ).toThrow("apiKey is required when local is false");
+    ).toThrow("apiKey is required");
   });
 });

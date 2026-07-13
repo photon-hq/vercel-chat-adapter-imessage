@@ -1,6 +1,6 @@
 # @photon-ai/chat-adapter-imessage
 
-iMessage community adapter for [Chat SDK](https://chat-sdk.dev/docs). Built on [spectrum-ts](https://github.com/photon-hq/spectrum-ts), Photon's unified messaging SDK. Supports **cloud** ([Spectrum Cloud](https://app.photon.codes)), **self-hosted**, and **local** (on-device, macOS) iMessage.
+iMessage community adapter for [Chat SDK](https://chat-sdk.dev/docs). Built on [spectrum-ts](https://github.com/photon-hq/spectrum-ts), Photon's unified messaging SDK. Supports **cloud** ([Spectrum Cloud](https://app.photon.codes)) and **self-hosted** iMessage.
 
 ## Installation
 
@@ -10,11 +10,10 @@ pnpm add chat @photon-ai/chat-adapter-imessage
 
 ## Usage
 
-The adapter has three modes:
+The adapter has two modes:
 
 - **Cloud** (recommended) — connects to [Spectrum Cloud](https://app.photon.codes) with a project ID + secret. Runs anywhere.
 - **Self-hosted** — connects to your own `@photon-ai/advanced-imessage` gRPC endpoint.
-- **Local** — runs directly on a Mac, reading the local iMessage database. macOS only.
 
 The mode is auto-detected from environment variables (see [Configuration](#configuration)).
 
@@ -28,30 +27,9 @@ const bot = new Chat({
   userName: "mybot",
   adapters: {
     imessage: createiMessageAdapter({
-      local: false,
       projectId: process.env.IMESSAGE_PROJECT_ID,
       projectSecret: process.env.IMESSAGE_PROJECT_SECRET,
     }),
-  },
-});
-
-bot.onNewMention(async (thread, message) => {
-  await thread.post("Hello from iMessage!");
-});
-```
-
-### Local mode
-
-For development or self-hosted deployments on a Mac. Reads from the local iMessage database and sends via the on-device APIs. Must run on macOS with **Full Disk Access** granted.
-
-```typescript
-import { Chat } from "chat";
-import { createiMessageAdapter } from "@photon-ai/chat-adapter-imessage";
-
-const bot = new Chat({
-  userName: "mybot",
-  adapters: {
-    imessage: createiMessageAdapter({ local: true }),
   },
 });
 
@@ -66,7 +44,6 @@ bot.onNewMention(async (thread, message) => {
 
 1. Sign up at [app.photon.codes](https://app.photon.codes) to get your **project ID** and **project secret**.
 2. Set `IMESSAGE_PROJECT_ID` and `IMESSAGE_PROJECT_SECRET`.
-3. Set `IMESSAGE_LOCAL=false`.
 
 ### Self-hosted mode
 
@@ -74,7 +51,6 @@ Point the adapter at your own `@photon-ai/advanced-imessage` gRPC server.
 
 1. Set `IMESSAGE_SERVER_URL` to the server's gRPC address as `host:port` (e.g. `imessage.example.com:443`).
 2. Set `IMESSAGE_API_KEY` to the server's auth token.
-3. Set `IMESSAGE_LOCAL=false`.
 
 > ⚠️ **Transport change.** Previous versions of this adapter spoke HTTP/Socket.IO. It now uses gRPC via spectrum-ts, so `IMESSAGE_SERVER_URL` must be a gRPC `host:port`, **not** an `https://` URL. A bare host gets `:443` appended; any URL scheme is stripped.
 
@@ -82,27 +58,18 @@ For advanced multi-number setups, pass explicit `clients` instead:
 
 ```typescript
 createiMessageAdapter({
-  local: false,
   clients: [
     { address: "imessage.example.com:443", token: "…", phone: "+1234567890" },
   ],
 });
 ```
 
-### Local mode
-
-Local mode requires running directly on a macOS machine with iMessage. It uses Apple's native APIs — reading from the local `chat.db` and sending on-device — with no external server.
-
-1. Grant **Full Disk Access** to your terminal or application in **System Settings → Privacy & Security → Full Disk Access**.
-2. Ensure iMessage is signed in and working on the Mac.
-3. No additional environment variables are required — local mode is the default.
-
 ## Receiving messages
 
 There are two ways to receive inbound messages:
 
 - **Webhooks** (recommended for serverless) — Spectrum Cloud delivers each message to an HTTPS endpoint as signed JSON. No long-lived connection or cron job. Remote (cloud) mode only.
-- **Gateway listener** — `startGatewayListener()` consumes spectrum-ts's message stream in real time. Works in all modes; in serverless it needs a cron job to stay connected.
+- **Gateway listener** — `startGatewayListener()` consumes spectrum-ts's message stream in real time. Works in cloud and self-hosted modes; in serverless it needs a cron job to stay connected.
 
 ## Webhooks
 
@@ -203,7 +170,6 @@ This runs every 9 minutes, ensuring overlap with the 10-minute listener duration
 
 | Option | Required | Description |
 |--------|----------|-------------|
-| `local` | No | `true` for local, `false` for cloud/self-host. Defaults to local unless `local: false`, `IMESSAGE_LOCAL=false`, or remote credentials (cloud/self-host) are provided |
 | `projectId` | Cloud | Spectrum Cloud project ID. Auto-detected from `IMESSAGE_PROJECT_ID` |
 | `projectSecret` | Cloud | Spectrum Cloud project secret. Auto-detected from `IMESSAGE_PROJECT_SECRET` |
 | `serverUrl` | Self-host | gRPC `host:port` of your iMessage server. Auto-detected from `IMESSAGE_SERVER_URL` |
@@ -217,8 +183,6 @@ This runs every 9 minutes, ensuring overlap with the 10-minute listener duration
 
 ```bash
 # .env.local
-IMESSAGE_LOCAL=false                  # "false" for cloud/self-host (default: true)
-
 # Cloud (recommended)
 IMESSAGE_PROJECT_ID=...
 IMESSAGE_PROJECT_SECRET=...
@@ -240,30 +204,28 @@ IMESSAGE_WEBHOOK_SECRET=whsec_...               # per-webhook signing secret
 | DMs | Yes |
 | Open DM (cold-start) | Yes (`openDM`) |
 | File uploads | Yes (send) |
-| Reactions (add) | Remote only |
-| Reactions (remove) | Remote only (session-added tapbacks) |
-| Message editing | Remote only |
-| Message delete | Remote only (iMessage unsend window) |
-| Mark read | Remote only (`markRead`) |
-| Typing indicator | Remote only |
-| Message effects | Remote only (`sendEffect`) |
-| Mini-app cards | Remote only (`sendMiniApp`) |
-| Voice messages | Remote only (`sendVoice`) |
-| Chat background | Remote only (`setBackground`) |
-| Modals | Limited (Remote only) |
+| Reactions (add) | Yes |
+| Reactions (remove) | Yes (session-added tapbacks) |
+| Message editing | Yes |
+| Message delete | Yes (iMessage unsend window) |
+| Mark read | Yes (`markRead`) |
+| Typing indicator | Yes |
+| Message effects | Yes (`sendEffect`) |
+| Mini-app cards | Yes (`sendMiniApp`) |
+| Voice messages | Yes (`sendVoice`) |
+| Chat background | Yes (`setBackground`) |
+| Modals | Limited |
 | Fetch single message | Yes (`fetchMessage`) |
 | Message history | No |
 | Thread/chat info | No |
 | Cards | Mini-app cards only (`sendMiniApp`) |
 | Streaming | No |
 | Ephemeral messages | No |
-| Webhooks | Yes (remote — Spectrum Cloud delivery) |
-
-> **Remote** means cloud or self-hosted mode (anything other than `local: true`).
+| Webhooks | Yes (Spectrum Cloud delivery) |
 
 ## Modals (Limited)
 
-Remote mode supports limited modal functionality by mapping the Chat SDK's `openModal()` to iMessage native polls. Only `Select` children are supported — the first `Select` in the modal becomes a poll.
+The adapter supports limited modal functionality by mapping the Chat SDK's `openModal()` to iMessage native polls. Only `Select` children are supported — the first `Select` in the modal becomes a poll.
 
 - `Modal.title` becomes the poll question.
 - `Select.options` become the poll choices (2–10 supported).
@@ -276,7 +238,7 @@ import { createiMessageAdapter } from "@photon-ai/chat-adapter-imessage";
 const bot = new Chat({
   userName: "mybot",
   adapters: {
-    imessage: createiMessageAdapter({ local: false }),
+    imessage: createiMessageAdapter(),
   },
 });
 
@@ -305,7 +267,7 @@ bot.onModalSubmit("fav-color", async (event) => {
 });
 ```
 
-**Not supported:** `Select.placeholder`/`label`, `TextInput`, `RadioSelect`, `Modal.submitLabel`/`closeLabel`, more than one `Select`, and poll vote *deselection*. Polls in the same chat must have distinct titles (votes are matched back to the modal by title). Local mode throws `NotImplementedError`.
+**Not supported:** `Select.placeholder`/`label`, `TextInput`, `RadioSelect`, `Modal.submitLabel`/`closeLabel`, more than one `Select`, and poll vote *deselection*. Polls in the same chat must have distinct titles (votes are matched back to the modal by title).
 
 ## Tapback reactions
 
@@ -322,12 +284,12 @@ iMessage uses tapbacks instead of emoji reactions. The adapter maps standard emo
 
 ## Message effects
 
-iMessage expressive-send effects animate a message when it arrives. The adapter exposes them through `sendEffect(threadId, message, effect)` — an adapter-specific extra (there is no first-class Chat SDK slot for effects). It sends the text with the effect attached and returns the sent message. Remote only; local mode throws `NotImplementedError`.
+iMessage expressive-send effects animate a message when it arrives. The adapter exposes them through `sendEffect(threadId, message, effect)` — an adapter-specific extra (there is no first-class Chat SDK slot for effects). It sends the text with the effect attached and returns the sent message.
 
 ```typescript
 import { createiMessageAdapter, iMessageEffect } from "@photon-ai/chat-adapter-imessage";
 
-const adapter = createiMessageAdapter({ local: false });
+const adapter = createiMessageAdapter();
 
 bot.onNewMention(async (thread) => {
   // Friendly name…
@@ -341,7 +303,7 @@ The `effect` argument accepts a friendly name or a value from the re-exported `i
 
 ## Mini-app cards
 
-Mini-app cards are native `MSMessageExtension` balloons — a rich card with a tap-through URL, the closest iMessage gets to a Slack-style rich card rather than a bare link. The adapter exposes them through `sendMiniApp(threadId, card)` — an adapter-specific extra (there is no first-class Chat SDK slot for cards). Remote only; local mode throws `NotImplementedError`.
+Mini-app cards are native `MSMessageExtension` balloons — a rich card with a tap-through URL, the closest iMessage gets to a Slack-style rich card rather than a bare link. The adapter exposes them through `sendMiniApp(threadId, card)` — an adapter-specific extra (there is no first-class Chat SDK slot for cards).
 
 `sendMiniApp` takes **either** a bare URL **or** a fully-specified card.
 
@@ -352,7 +314,7 @@ The lightweight form: pass a URL string and iMessage renders it as a mini-app �
 ```typescript
 import { createiMessageAdapter } from "@photon-ai/chat-adapter-imessage";
 
-const adapter = createiMessageAdapter({ local: false });
+const adapter = createiMessageAdapter();
 
 bot.onNewMention(async (thread) => {
   await adapter.sendMiniApp(thread.id, "https://example.com/menu");
@@ -387,7 +349,7 @@ await adapter.sendMiniApp(thread.id, {
 
 ## Chat background
 
-iMessage lets a conversation carry its own wallpaper — a touch with no analog on the plain-text competitors. The adapter exposes it through `setBackground(threadId, input, options?)` — an adapter-specific extra (there is no first-class Chat SDK slot for it). It is fire-and-forget: iMessage acknowledges the control signal without returning a message, so the call resolves to `void`. Remote only; local mode throws `NotImplementedError`.
+iMessage lets a conversation carry its own wallpaper — a touch with no analog on the plain-text competitors. The adapter exposes it through `setBackground(threadId, input, options?)` — an adapter-specific extra (there is no first-class Chat SDK slot for it). It is fire-and-forget: iMessage acknowledges the control signal without returning a message, so the call resolves to `void`.
 
 ```typescript
 import { readFile } from "node:fs/promises";
@@ -412,37 +374,35 @@ Pass the literal `"clear"` to remove the current background, in-memory image byt
 - **No message history.** `fetchMessages` is not supported — spectrum-ts exposes no paginated history API. Single messages resolve via `fetchMessage` (from the session cache or spectrum-ts's by-id lookup).
 - **No thread/chat info.** `fetchThread` is not supported.
 - **Session-scoped delete & reaction removal.** `deleteMessage` unsends a message resolved from this session (subject to iMessage's ~2-minute unsend window); `removeReaction` retracts a tapback only if it was added via `addReaction` earlier in this session — spectrum-ts exposes no by-target reaction lookup.
-- **Local mode** supports sending (including cold sends by chat GUID), receiving, and opening DMs, but not reactions, typing, editing, deleting, marking read, effects, modals, history, or thread info.
-- **Formatting.** Markdown-typed content (`{ markdown }` or `{ ast }`) renders as native iMessage styled text on remote — bold, italics, links, and lists — via spectrum-ts's `markdown()` builder. Plain strings and `{ raw }` are sent as-is (never reinterpreted as Markdown). Inbound messages always surface as plain text.
-- **Platform.** Local mode requires macOS. Cloud and self-host run anywhere.
+- **Formatting.** Markdown-typed content (`{ markdown }` or `{ ast }`) renders as native iMessage styled text — bold, italics, links, and lists — via spectrum-ts's `markdown()` builder. Plain strings and `{ raw }` are sent as-is (never reinterpreted as Markdown). Inbound messages always surface as plain text.
 - **Cards.** iMessage has no structured card layouts.
 
 ## Breaking changes
 
 This version re-platforms the adapter onto **spectrum-ts**. If you are upgrading:
 
+- **Local (on-device) mode removed** — `local: true`, and `IMESSAGE_LOCAL` set to any value other than `"false"`, now throw. Use Spectrum Cloud or a self-hosted gRPC endpoint; `local: false` and `IMESSAGE_LOCAL=false` are still accepted as no-ops.
 - **Dependency** — replaces `@photon-ai/imessage-kit` + `@photon-ai/advanced-imessage-kit` with `spectrum-ts`.
 - **`IMESSAGE_SERVER_URL` is now a gRPC `host:port`** (self-host), not an `https://` / Socket.IO URL.
 - **New cloud path** — set `IMESSAGE_PROJECT_ID` + `IMESSAGE_PROJECT_SECRET` for Spectrum Cloud.
-- **Unsupported capabilities** (throw `NotImplementedError`): `fetchMessages` and `fetchThread` — spectrum-ts exposes no paginated history or chat-info API. Local `fetchMessages` (previously supported) is also removed. Cold `postMessage` works for DMs and groups alike (rebuilt from the chat GUID — see [Limitations](#limitations)).
-- **Newly supported on spectrum-ts v8**: `deleteMessage` (unsend), `removeReaction` (retract a session-added tapback), `openDM` (cold-start a DM from a handle), `fetchMessage` (single message by id), and `markRead` — all remote-only where noted in [Features](#features).
+- **Unsupported capabilities** (throw `NotImplementedError`): `fetchMessages` and `fetchThread` — spectrum-ts exposes no paginated history or chat-info API. Cold `postMessage` works for DMs and groups alike (rebuilt from the chat GUID — see [Limitations](#limitations)).
+- **Newly supported on spectrum-ts**: `deleteMessage` (unsend), `removeReaction` (retract a session-added tapback), `openDM` (cold-start a DM from a handle), `fetchMessage` (single message by id), and `markRead` — see [Features](#features).
 - **`adapter.sdk` → `adapter.app`** — the adapter now exposes the underlying `SpectrumInstance` as `adapter.app` (null until `initialize()`).
 
 ## Troubleshooting
 
-### "serverUrl is required when local is false"
+### "serverUrl is required"
 
 - Provide cloud credentials (`IMESSAGE_PROJECT_ID` + `IMESSAGE_PROJECT_SECRET`), or a self-host `IMESSAGE_SERVER_URL` + `IMESSAGE_API_KEY`.
+
+### "Local (on-device) mode was removed"
+
+- The adapter no longer runs against the on-device Messages database. Remove `local: true` (and any `IMESSAGE_LOCAL` value other than `"false"`, which is still accepted as a no-op) and provide cloud or self-host credentials instead.
 
 ### Self-host connection issues
 
 - Confirm `IMESSAGE_SERVER_URL` is a gRPC `host:port` (e.g. `imessage.example.com:443`), not an `https://` URL.
 - Verify the token matches your server's credentials.
-
-### Local mode not receiving messages
-
-- Verify **Full Disk Access** is granted to your terminal or application.
-- Check that iMessage is signed in and working.
 
 ### `NotImplementedError` from `fetchMessages` / `fetchThread`
 
@@ -450,7 +410,7 @@ This version re-platforms the adapter onto **spectrum-ts**. If you are upgrading
 
 ### `NotImplementedError` from `deleteMessage` / `removeReaction` / `markRead`
 
-- These are remote-only and session-scoped. `deleteMessage` and `markRead` need the target message to have been seen this session (and delete is bound by iMessage's ~2-minute unsend window); `removeReaction` needs the tapback to have been added via `addReaction` this session. In local mode they throw. See [Limitations](#limitations).
+- These are session-scoped. `deleteMessage` and `markRead` need the target message to have been seen this session (and delete is bound by iMessage's ~2-minute unsend window); `removeReaction` needs the tapback to have been added via `addReaction` this session. See [Limitations](#limitations).
 
 ## License
 

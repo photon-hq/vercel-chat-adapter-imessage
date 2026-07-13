@@ -5,31 +5,26 @@ import type { IMessageClientEntry } from "./types";
 export const SHARED_PHONE = "shared";
 
 /** Provider config shape accepted by `imessage.config(...)`. */
-export type IMessageProviderConfig =
-  | { local: true }
-  | { clients?: IMessageClientEntry[]; local?: false };
-
-export interface iMessageAdapterLocalConfig {
-  /** Unused in local mode; accepted for symmetry/back-compat. */
-  apiKey?: string;
-  local: true;
-  logger: Logger;
-  /** Unused in local mode; accepted for symmetry/back-compat. */
-  serverUrl?: string;
+export interface IMessageProviderConfig {
+  clients?: IMessageClientEntry[];
 }
 
-export interface iMessageAdapterRemoteConfig {
+export interface iMessageAdapterConfig {
   /** Legacy self-host token. Mapped to a `clients` entry's `token`. */
   apiKey?: string;
   /** Explicit self-host gRPC clients (advanced). */
   clients?: IMessageClientEntry | IMessageClientEntry[];
-  local: false;
+  /**
+   * @deprecated Local (on-device) mode was removed. `false` is accepted as a
+   * no-op for back-compat; `true` throws.
+   */
+  local?: false;
   logger: Logger;
   /** Routing/identity phone for legacy self-host (defaults to `"shared"`). */
   phone?: string;
-  /** Spectrum Cloud project id (recommended remote path). */
+  /** Spectrum Cloud project id (recommended path). */
   projectId?: string;
-  /** Spectrum Cloud project secret (recommended remote path). */
+  /** Spectrum Cloud project secret (recommended path). */
   projectSecret?: string;
   /** Legacy self-host endpoint. Now a gRPC `host:port` (see README). */
   serverUrl?: string;
@@ -37,13 +32,16 @@ export interface iMessageAdapterRemoteConfig {
   webhookSecret?: string;
 }
 
-export type iMessageAdapterConfig =
-  | iMessageAdapterLocalConfig
-  | iMessageAdapterRemoteConfig;
+/** @deprecated Use {@link iMessageAdapterConfig}. */
+export type iMessageAdapterRemoteConfig = iMessageAdapterConfig;
 
 export interface CreateiMessageAdapterOptions {
   apiKey?: string;
   clients?: IMessageClientEntry | IMessageClientEntry[];
+  /**
+   * @deprecated Local (on-device) mode was removed. `false` is accepted as a
+   * no-op for back-compat; `true` throws.
+   */
   local?: boolean;
   logger?: Logger;
   phone?: string;
@@ -82,20 +80,14 @@ export interface RemoteAuth {
 }
 
 /**
- * Translate the adapter's stored config into the `imessage.config(...)` payload
- * plus any Spectrum Cloud credentials.
+ * Translate the adapter's stored remote config into the `imessage.config(...)`
+ * payload plus any Spectrum Cloud credentials.
  */
-export function resolveSpectrumConfig(
-  local: boolean,
-  auth: RemoteAuth
-): {
+export function resolveSpectrumConfig(auth: RemoteAuth): {
   projectId?: string;
   projectSecret?: string;
   providerConfig: IMessageProviderConfig;
 } {
-  if (local) {
-    return { providerConfig: { local: true } };
-  }
   if (auth.projectId && auth.projectSecret) {
     return {
       providerConfig: {},
@@ -121,6 +113,6 @@ export function resolveSpectrumConfig(
   }
   throw new ValidationError(
     "imessage",
-    "Remote mode requires Spectrum Cloud credentials (projectId + projectSecret), explicit clients, or serverUrl + apiKey."
+    "The adapter requires Spectrum Cloud credentials (projectId + projectSecret), explicit clients, or serverUrl + apiKey."
   );
 }

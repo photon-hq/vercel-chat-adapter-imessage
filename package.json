@@ -1,6 +1,6 @@
 {
   "name": "@photon-ai/chat-adapter-imessage",
-  "version": "2.2.1",
+  "version": "3.0.0",
   "description": "iMessage adapter for Chat SDK",
   "type": "module",
   "main": "./dist/index.js",
@@ -31,7 +31,7 @@
   "dependencies": {
     "@chat-adapter/shared": "^4.32.0",
     "mime-types": "^3.0.2",
-    "spectrum-ts": "^8.2.1"
+    "spectrum-ts": "10.0.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.2",
@@ -43,9 +43,16 @@
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "ultracite": "7.8.4",
+    "vite": "^7.3.6",
     "vitest": "^4.1.9"
   },
   "packageManager": "pnpm@10.30.3",
+  "pnpm": {
+    "overrides": {
+      "esbuild@>=0.27.3 <0.28.1": "^0.28.1",
+      "@opentelemetry/core@<2.8.0": "^2.8.0"
+    }
+  },
   "publishConfig": {
     "access": "public"
   },
