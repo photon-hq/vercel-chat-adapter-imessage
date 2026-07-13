@@ -4,10 +4,14 @@ import type { IMessageClientEntry } from "./types";
 
 export const SHARED_PHONE = "shared";
 
-/** Provider config shape accepted by `imessage.config(...)`. */
-export type IMessageProviderConfig =
-  | { local: true }
-  | { clients?: IMessageClientEntry[]; local?: false };
+/**
+ * Provider config shape accepted by the remote `imessage.config(...)`.
+ * Local (on-device) access lives in `@spectrum-ts/imessage-local` since
+ * spectrum-ts v10 and takes an empty config.
+ */
+export interface IMessageProviderConfig {
+  clients?: IMessageClientEntry[];
+}
 
 export interface iMessageAdapterLocalConfig {
   /** Unused in local mode; accepted for symmetry/back-compat. */
@@ -82,20 +86,14 @@ export interface RemoteAuth {
 }
 
 /**
- * Translate the adapter's stored config into the `imessage.config(...)` payload
- * plus any Spectrum Cloud credentials.
+ * Translate the adapter's stored remote config into the `imessage.config(...)`
+ * payload plus any Spectrum Cloud credentials.
  */
-export function resolveSpectrumConfig(
-  local: boolean,
-  auth: RemoteAuth
-): {
+export function resolveSpectrumConfig(auth: RemoteAuth): {
   projectId?: string;
   projectSecret?: string;
   providerConfig: IMessageProviderConfig;
 } {
-  if (local) {
-    return { providerConfig: { local: true } };
-  }
   if (auth.projectId && auth.projectSecret) {
     return {
       providerConfig: {},

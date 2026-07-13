@@ -14,11 +14,13 @@ import {
 // with inspectable passthroughs so we can assert on what was sent.
 // ---------------------------------------------------------------------------
 
-const { mockSpectrum, mockImessageConfig, mockImessage } = vi.hoisted(() => ({
-  mockSpectrum: vi.fn(),
-  mockImessageConfig: vi.fn((c: unknown) => ({ __providerConfig: c })),
-  mockImessage: vi.fn(),
-}));
+const { mockSpectrum, mockImessageConfig, mockImessage, mockLocalConfig } =
+  vi.hoisted(() => ({
+    mockSpectrum: vi.fn(),
+    mockImessageConfig: vi.fn((c: unknown) => ({ __providerConfig: c })),
+    mockImessage: vi.fn(),
+    mockLocalConfig: vi.fn((c: unknown) => ({ __localProviderConfig: c })),
+  }));
 
 vi.mock("spectrum-ts", () => ({
   Spectrum: mockSpectrum,
@@ -73,6 +75,15 @@ vi.mock("spectrum-ts/providers/imessage", () => ({
     __kind: "background",
     input,
     options,
+  }),
+}));
+
+// Local (on-device) provider — a separate package since spectrum-ts v10. The
+// accessor delegates to the shared `mockImessage` so space.get/create
+// behaviors set in beforeEach apply to local-mode adapters too.
+vi.mock("@spectrum-ts/imessage-local", () => ({
+  imessage: Object.assign((app: unknown) => mockImessage(app), {
+    config: mockLocalConfig,
   }),
 }));
 
@@ -456,6 +467,7 @@ beforeEach(() => {
   mockSpectrum.mockReset();
   mockSpectrum.mockResolvedValue(mockApp);
   mockImessageConfig.mockClear();
+  mockLocalConfig.mockClear();
   // Default: `imessage(app).space.get(chatGuid)` rebuilds a space by chat GUID.
   // Tests that assert on the resolved space override this per-case.
   mockImessage.mockReset();
@@ -554,11 +566,12 @@ describe("iMessageAdapter constructor", () => {
 });
 
 describe("initialize", () => {
-  it("builds a Spectrum instance with local provider config", async () => {
+  it("builds a Spectrum instance with the local provider", async () => {
     await init(localAdapter());
-    expect(mockImessageConfig).toHaveBeenCalledWith({ local: true });
+    expect(mockLocalConfig).toHaveBeenCalledWith({});
+    expect(mockImessageConfig).not.toHaveBeenCalled();
     expect(mockSpectrum).toHaveBeenCalledWith({
-      providers: [{ __providerConfig: { local: true } }],
+      providers: [{ __localProviderConfig: {} }],
     });
   });
 

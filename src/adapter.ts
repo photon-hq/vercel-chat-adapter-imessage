@@ -86,6 +86,12 @@ export class iMessageAdapter implements Adapter {
   app: SpectrumInstance | null = null;
   /** In-flight app build, so concurrent callers share one construction. */
   private appBuild: Promise<void> | null = null;
+  /**
+   * The iMessage platform the app was built with — the remote provider by
+   * default, swapped for `@spectrum-ts/imessage-local`'s in local mode so
+   * accessor calls (`platform(app).space...`) hit the registered provider.
+   */
+  private platform: typeof imessage = imessage;
 
   private chat: ChatInstance | null = null;
   private readonly logger: Logger;
@@ -156,32 +162,31 @@ export class iMessageAdapter implements Adapter {
   }
 
   private async buildApp(): Promise<void> {
-    const { providerConfig, projectId, projectSecret } = resolveSpectrumConfig(
-      this.local,
-      {
-        apiKey: this.apiKey,
-        clients: this.clients,
-        phone: this.phone,
-        projectId: this.projectId,
-        projectSecret: this.projectSecret,
-        serverUrl: this.serverUrl,
-      }
-    );
-    const providers = [imessage.config(providerConfig)];
-
-    this.app =
-      projectId && projectSecret
-        ? await Spectrum({ providers, projectId, projectSecret })
-        : await Spectrum({ providers });
-
     let mode: "local" | "cloud" | "self-host";
     if (this.local) {
+      const local = await loadLocalIMessage();
+      this.platform = local.imessage as unknown as typeof imessage;
+      this.app = await Spectrum({ providers: [local.imessage.config({})] });
       mode = "local";
-    } else if (projectId) {
-      mode = "cloud";
     } else {
-      mode = "self-host";
+      const { providerConfig, projectId, projectSecret } =
+        resolveSpectrumConfig({
+          apiKey: this.apiKey,
+          clients: this.clients,
+          phone: this.phone,
+          projectId: this.projectId,
+          projectSecret: this.projectSecret,
+          serverUrl: this.serverUrl,
+        });
+      const providers = [imessage.config(providerConfig)];
+
+      this.app =
+        projectId && projectSecret
+          ? await Spectrum({ providers, projectId, projectSecret })
+          : await Spectrum({ providers });
+      mode = projectId ? "cloud" : "self-host";
     }
+
     this.logger.info("iMessage adapter initialized", {
       local: this.local,
       mode,
@@ -946,7 +951,7 @@ export class iMessageAdapter implements Adapter {
       throw new Error("Adapter not initialized");
     }
     return (
-      imessage(this.app) as unknown as {
+      this.platform(this.app) as unknown as {
         space: {
           get(
             id: string,
@@ -988,6 +993,27 @@ export class iMessageAdapter implements Adapter {
       return;
     }
     return (await space.getMessage(messageId)) ?? undefined;
+  }
+}
+
+/**
+ * spectrum-ts v10 ships local (on-device macOS) Messages access as the
+ * separate `@spectrum-ts/imessage-local` package. It pulls native modules
+ * (better-sqlite3), so it's an optional peer dependency imported only when
+ * local mode is requested.
+ */
+async function loadLocalIMessage(): Promise<
+  typeof import("@spectrum-ts/imessage-local")
+> {
+  try {
+    return await import("@spectrum-ts/imessage-local");
+  } catch (error) {
+    throw new ValidationError(
+      "imessage",
+      "Local mode requires the optional @spectrum-ts/imessage-local package. " +
+        "Install it alongside the adapter (e.g. `pnpm add @spectrum-ts/imessage-local`). " +
+        `Import failed: ${String(error)}`
+    );
   }
 }
 

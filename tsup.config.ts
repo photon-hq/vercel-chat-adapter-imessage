@@ -12,5 +12,6 @@ export default defineConfig({
     "mime-types",
     "spectrum-ts",
     "spectrum-ts/providers/imessage",
+    "@spectrum-ts/imessage-local",
   ],
 });
