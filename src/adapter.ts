@@ -73,7 +73,6 @@ const TYPING_DURATION_MS = 3000;
 export class iMessageAdapter implements Adapter {
   readonly name = "imessage";
   readonly userName: string = "";
-  readonly local: boolean;
   readonly serverUrl?: string;
   readonly apiKey?: string;
   readonly projectId?: string;
@@ -86,12 +85,6 @@ export class iMessageAdapter implements Adapter {
   app: SpectrumInstance | null = null;
   /** In-flight app build, so concurrent callers share one construction. */
   private appBuild: Promise<void> | null = null;
-  /**
-   * The iMessage platform the app was built with — the remote provider by
-   * default, swapped for `@spectrum-ts/imessage-local`'s in local mode so
-   * accessor calls (`platform(app).space...`) hit the registered provider.
-   */
-  private platform: typeof imessage = imessage;
 
   private chat: ChatInstance | null = null;
   private readonly logger: Logger;
@@ -103,29 +96,25 @@ export class iMessageAdapter implements Adapter {
   private pump: MessagePump | null = null;
 
   constructor(config: iMessageAdapterConfig) {
-    if (config.local && process.platform !== "darwin") {
+    // fail loudly instead of silently running in remote mode.
+    if (config.local) {
       throw new ValidationError(
         "imessage",
-        "iMessage adapter local mode requires macOS. Current platform: " +
-          process.platform
+        "Local (on-device) mode was removed from this adapter. Use Spectrum Cloud (projectId + projectSecret) or a self-hosted gRPC endpoint instead."
       );
     }
 
-    this.local = config.local;
     this.logger = config.logger;
     this.serverUrl = config.serverUrl;
     this.apiKey = config.apiKey;
-
-    if (!config.local) {
-      this.projectId = config.projectId;
-      this.projectSecret = config.projectSecret;
-      this.phone = config.phone;
-      this.clients = toClientArray(config.clients);
-      // Trim here too so direct `new iMessageAdapter(...)` matches the factory
-      // (createiMessageAdapter trims it): a stray space would otherwise fail
-      // signature verification only on the constructor path.
-      this.webhookSecret = config.webhookSecret?.trim();
-    }
+    this.projectId = config.projectId;
+    this.projectSecret = config.projectSecret;
+    this.phone = config.phone;
+    this.clients = toClientArray(config.clients);
+    // Trim here too so direct `new iMessageAdapter(...)` matches the factory
+    // (createiMessageAdapter trims it): a stray space would otherwise fail
+    // signature verification only on the constructor path.
+    this.webhookSecret = config.webhookSecret?.trim();
   }
 
   async initialize(chat: ChatInstance): Promise<void> {
@@ -162,34 +151,23 @@ export class iMessageAdapter implements Adapter {
   }
 
   private async buildApp(): Promise<void> {
-    let mode: "local" | "cloud" | "self-host";
-    if (this.local) {
-      const local = await loadLocalIMessage();
-      this.platform = local.imessage as unknown as typeof imessage;
-      this.app = await Spectrum({ providers: [local.imessage.config({})] });
-      mode = "local";
-    } else {
-      const { providerConfig, projectId, projectSecret } =
-        resolveSpectrumConfig({
-          apiKey: this.apiKey,
-          clients: this.clients,
-          phone: this.phone,
-          projectId: this.projectId,
-          projectSecret: this.projectSecret,
-          serverUrl: this.serverUrl,
-        });
-      const providers = [imessage.config(providerConfig)];
+    const { providerConfig, projectId, projectSecret } = resolveSpectrumConfig({
+      apiKey: this.apiKey,
+      clients: this.clients,
+      phone: this.phone,
+      projectId: this.projectId,
+      projectSecret: this.projectSecret,
+      serverUrl: this.serverUrl,
+    });
+    const providers = [imessage.config(providerConfig)];
 
-      this.app =
-        projectId && projectSecret
-          ? await Spectrum({ providers, projectId, projectSecret })
-          : await Spectrum({ providers });
-      mode = projectId ? "cloud" : "self-host";
-    }
+    this.app =
+      projectId && projectSecret
+        ? await Spectrum({ providers, projectId, projectSecret })
+        : await Spectrum({ providers });
 
     this.logger.info("iMessage adapter initialized", {
-      local: this.local,
-      mode,
+      mode: projectId ? "cloud" : "self-host",
     });
   }
 
@@ -209,12 +187,6 @@ export class iMessageAdapter implements Adapter {
   ): Promise<Response> {
     if (!this.chat) {
       return new Response("Chat instance not initialized", { status: 500 });
-    }
-    if (this.local) {
-      return new Response(
-        "Webhooks require remote (cloud) mode — local mode receives via startGatewayListener()",
-        { status: 501 }
-      );
     }
     if (!this.webhookSecret) {
       return new Response(
@@ -314,7 +286,7 @@ export class iMessageAdapter implements Adapter {
    * (`confetti`, `fireworks`, `balloons`, `heart`, `lasers`, `celebration`,
    * `sparkles`, `spotlight`, `echo`). Not part of the Chat SDK `Adapter`
    * interface — exposed as an adapter-specific extra (e.g. celebratory confetti
-   * on task completion). Remote only.
+   * on task completion).
    *
    * The `effect` argument accepts a friendly name (`"confetti"`) or a value from
    * the re-exported `iMessageEffect` map. Effects attach to text content only,
@@ -325,13 +297,6 @@ export class iMessageAdapter implements Adapter {
     message: AdapterPostableMessage,
     effect: IMessageMessageEffect | iMessageEffectName
   ): Promise<RawMessage> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "sendEffect is not supported in local mode",
-        "sendEffect"
-      );
-    }
-
     const space = await this.requireSpace(threadId, "sendEffect");
     const { body, content } = this.toSpectrumContent(message);
     if (!body || body.trim().length === 0) {
@@ -357,7 +322,7 @@ export class iMessageAdapter implements Adapter {
    * Send an iMessage mini-app card — an `MSMessageExtension` balloon, the
    * closest iMessage gets to a rich card (à la Slack Block Kit) instead of a
    * bare link. Not part of the Chat SDK `Adapter` interface — exposed as an
-   * adapter-specific extra. Remote only.
+   * adapter-specific extra.
    *
    * Two forms:
    *
@@ -375,13 +340,6 @@ export class iMessageAdapter implements Adapter {
     threadId: string,
     input: MiniAppCard | AppUrl
   ): Promise<RawMessage> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "sendMiniApp is not supported in local mode",
-        "sendMiniApp"
-      );
-    }
-
     const space = await this.requireSpace(threadId, "sendMiniApp");
     const content = isAppUrl(input)
       ? appContent(input)
@@ -402,7 +360,7 @@ export class iMessageAdapter implements Adapter {
    * message renders with `isAudioMessage`), not an audio file dropped in as an
    * attachment. A natural fit for TTS-capable bots that reply with speech. Not
    * part of the Chat SDK `Adapter` interface — exposed as an adapter-specific
-   * extra. Remote only.
+   * extra.
    *
    * The `input` is either in-memory audio bytes (`Uint8Array` / `Buffer` /
    * `ArrayBuffer`, a `Blob`, or a Chat SDK `FileUpload`) or an `http(s)` URL (a
@@ -415,13 +373,6 @@ export class iMessageAdapter implements Adapter {
     input: VoiceInput,
     options?: VoiceOptions
   ): Promise<RawMessage> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "sendVoice is not supported in local mode",
-        "sendVoice"
-      );
-    }
-
     const space = await this.requireSpace(threadId, "sendVoice");
     const content = await resolveVoice(input, options);
     const sent = await space.send(content);
@@ -439,7 +390,6 @@ export class iMessageAdapter implements Adapter {
    * Set or clear the chat background — the wallpaper behind a conversation, an
    * iMessage-only touch with no analog on the plain-text competitors. Not part
    * of the Chat SDK `Adapter` interface — exposed as an adapter-specific extra.
-   * Remote only.
    *
    * The `input` is either the literal `"clear"` (to remove the current
    * background), in-memory image bytes (`Uint8Array` / `Buffer` / `ArrayBuffer`,
@@ -456,13 +406,6 @@ export class iMessageAdapter implements Adapter {
     input: BackgroundInput,
     options?: BackgroundOptions
   ): Promise<void> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "setBackground is not supported in local mode",
-        "setBackground"
-      );
-    }
-
     const space = await this.requireSpace(threadId, "setBackground");
     const content = await resolveBackground(input, options);
     await space.send(content);
@@ -473,13 +416,6 @@ export class iMessageAdapter implements Adapter {
     messageId: string,
     message: AdapterPostableMessage
   ): Promise<RawMessage> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "editMessage is not supported in local mode",
-        "editMessage"
-      );
-    }
-
     const target = await this.resolveMessage(threadId, messageId);
     if (!target) {
       throw new NotImplementedError(
@@ -493,13 +429,6 @@ export class iMessageAdapter implements Adapter {
   }
 
   async deleteMessage(threadId: string, messageId: string): Promise<void> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "deleteMessage is not supported in local mode",
-        "deleteMessage"
-      );
-    }
-
     const target = await this.resolveMessage(threadId, messageId);
     if (!target) {
       throw new NotImplementedError(
@@ -559,13 +488,6 @@ export class iMessageAdapter implements Adapter {
     messageId: string,
     emoji: EmojiValue | string
   ): Promise<void> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "addReaction is not supported in local mode",
-        "addReaction"
-      );
-    }
-
     const glyph = emojiToGlyph(emoji);
     const target = await this.resolveMessage(threadId, messageId);
     if (!target) {
@@ -586,13 +508,6 @@ export class iMessageAdapter implements Adapter {
     messageId: string,
     emoji: EmojiValue | string
   ): Promise<void> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "removeReaction is not supported in local mode",
-        "removeReaction"
-      );
-    }
-
     // spectrum-ts message ids are globally unique, so the target message id
     // alone keys the reaction handle — the thread id isn't needed here.
     const glyph = emojiToGlyph(emoji);
@@ -608,13 +523,6 @@ export class iMessageAdapter implements Adapter {
   }
 
   async startTyping(threadId: string, _status?: string): Promise<void> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "startTyping is not supported in local mode",
-        "startTyping"
-      );
-    }
-
     const space = await this.requireSpace(threadId, "startTyping");
     await space.startTyping();
     setTimeout(() => {
@@ -649,17 +557,10 @@ export class iMessageAdapter implements Adapter {
 
   /**
    * Mark a received message (and the conversation up to it) as read, surfacing
-   * a read receipt where iMessage supports one. Remote only; not part of the
+   * a read receipt where iMessage supports one. Not part of the
    * Chat SDK `Adapter` interface — exposed as an adapter-specific extra.
    */
   async markRead(threadId: string, messageId: string): Promise<void> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "markRead is not supported in local mode",
-        "markRead"
-      );
-    }
-
     const target = await this.resolveMessage(threadId, messageId);
     if (!target) {
       throw new NotImplementedError(
@@ -676,13 +577,6 @@ export class iMessageAdapter implements Adapter {
     modal: ModalElement,
     contextId?: string
   ): Promise<{ viewId: string }> {
-    if (this.local) {
-      throw new NotImplementedError(
-        "openModal is not supported in local mode",
-        "openModal"
-      );
-    }
-
     const select = modal.children.find(
       (c): c is SelectElement => c.type === "select"
     );
@@ -752,7 +646,7 @@ export class iMessageAdapter implements Adapter {
 
     this.logger.info("Starting iMessage Gateway listener", {
       durationMs,
-      mode: this.local ? "local" : "remote",
+      mode: "remote",
     });
 
     this.gatewayOptions = options;
@@ -780,7 +674,7 @@ export class iMessageAdapter implements Adapter {
       JSON.stringify({
         status: "listening",
         durationMs,
-        mode: this.local ? "local" : "remote",
+        mode: "remote",
         message: `Gateway listener started, will run for ${durationMs / 1000} seconds`,
       }),
       {
@@ -951,7 +845,7 @@ export class iMessageAdapter implements Adapter {
       throw new Error("Adapter not initialized");
     }
     return (
-      this.platform(this.app) as unknown as {
+      imessage(this.app) as unknown as {
         space: {
           get(
             id: string,
@@ -993,27 +887,6 @@ export class iMessageAdapter implements Adapter {
       return;
     }
     return (await space.getMessage(messageId)) ?? undefined;
-  }
-}
-
-/**
- * spectrum-ts v10 ships local (on-device macOS) Messages access as the
- * separate `@spectrum-ts/imessage-local` package. It pulls native modules
- * (better-sqlite3), so it's an optional peer dependency imported only when
- * local mode is requested.
- */
-async function loadLocalIMessage(): Promise<
-  typeof import("@spectrum-ts/imessage-local")
-> {
-  try {
-    return await import("@spectrum-ts/imessage-local");
-  } catch (error) {
-    throw new ValidationError(
-      "imessage",
-      "Local mode requires the optional @spectrum-ts/imessage-local package. " +
-        "Install it alongside the adapter (e.g. `pnpm add @spectrum-ts/imessage-local`). " +
-        `Import failed: ${String(error)}`
-    );
   }
 }
 

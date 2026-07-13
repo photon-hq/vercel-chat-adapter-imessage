@@ -3,26 +3,21 @@ import { ConsoleLogger } from "chat";
 import { iMessageAdapter } from "./adapter";
 import type { CreateiMessageAdapterOptions } from "./config";
 
+const LOCAL_MODE_REMOVED =
+  "Local (on-device) mode was removed from this adapter. Use Spectrum Cloud " +
+  "(IMESSAGE_PROJECT_ID + IMESSAGE_PROJECT_SECRET) or a self-hosted gRPC " +
+  "endpoint (IMESSAGE_SERVER_URL + IMESSAGE_API_KEY) instead.";
+
 /**
- * Decide local vs remote: an explicit local signal (`config.local`, then
- * `IMESSAGE_LOCAL`) wins; otherwise pick remote when remote credentials are
- * present, else local.
+ * Throw if the caller asks for the removed local mode — an explicit
+ * `config.local: true`, or `IMESSAGE_LOCAL` set to anything but `"false"`
+ * (the legacy "remote" opt-out, still accepted as a no-op).
  */
-function resolveLocalMode(
-  explicit: boolean | undefined,
-  hasRemoteCreds: boolean
-): boolean {
-  if (explicit !== undefined) {
-    return explicit;
-  }
+function rejectLocalMode(explicit: boolean | undefined): void {
   const env = process.env.IMESSAGE_LOCAL;
-  if (env === "false") {
-    return false;
+  if (explicit === true || (explicit === undefined && env && env !== "false")) {
+    throw new ValidationError("imessage", LOCAL_MODE_REMOVED);
   }
-  if (env === undefined) {
-    return !hasRemoteCreds;
-  }
-  return true;
 }
 
 function assertRemoteCredentials(creds: {
@@ -37,29 +32,27 @@ function assertRemoteCredentials(creds: {
   if (!creds.hasServerUrl) {
     throw new ValidationError(
       "imessage",
-      "serverUrl is required when local is false. Set IMESSAGE_SERVER_URL (or use IMESSAGE_PROJECT_ID/IMESSAGE_PROJECT_SECRET for Spectrum Cloud), or provide it in config."
+      "serverUrl is required. Set IMESSAGE_SERVER_URL (or use IMESSAGE_PROJECT_ID/IMESSAGE_PROJECT_SECRET for Spectrum Cloud), or provide it in config."
     );
   }
   if (!creds.hasApiKey) {
     throw new ValidationError(
       "imessage",
-      "apiKey is required when local is false. Set IMESSAGE_API_KEY or provide it in config."
+      "apiKey is required. Set IMESSAGE_API_KEY or provide it in config."
     );
   }
 }
 
 /**
  * Construct an {@link iMessageAdapter}, filling unset options from environment
- * variables.
- *
- * Mode is chosen by an explicit local signal first — `config.local`, then
- * `IMESSAGE_LOCAL` — otherwise remote when remote credentials are present (cloud
- * `projectId` + `projectSecret`, or self-host `clients` / `serverUrl` +
- * `apiKey`), else local.
+ * variables. Requires remote credentials: cloud `projectId` + `projectSecret`,
+ * or self-host `clients` / `serverUrl` + `apiKey`.
  */
 export function createiMessageAdapter(
   config?: CreateiMessageAdapterOptions
 ): iMessageAdapter {
+  rejectLocalMode(config?.local);
+
   const logger = config?.logger ?? new ConsoleLogger("info").child("imessage");
 
   const projectId = config?.projectId ?? process.env.IMESSAGE_PROJECT_ID;
@@ -83,16 +76,10 @@ export function createiMessageAdapter(
   const hasCloud = Boolean(projectId && projectSecret);
   const hasServerUrl = Boolean(serverUrl);
   const hasApiKey = Boolean(apiKey);
-  const hasRemoteCreds = hasCloud || hasClients || (hasServerUrl && hasApiKey);
-
-  if (resolveLocalMode(config?.local, hasRemoteCreds)) {
-    return new iMessageAdapter({ local: true, logger, serverUrl, apiKey });
-  }
 
   assertRemoteCredentials({ hasApiKey, hasClients, hasCloud, hasServerUrl });
 
   return new iMessageAdapter({
-    local: false,
     logger,
     projectId,
     projectSecret,

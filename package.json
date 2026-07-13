@@ -26,13 +26,7 @@
     "clean": "rm -rf dist coverage"
   },
   "peerDependencies": {
-    "@spectrum-ts/imessage-local": "10.0.0",
     "chat": "^4.14.0"
-  },
-  "peerDependenciesMeta": {
-    "@spectrum-ts/imessage-local": {
-      "optional": true
-    }
   },
   "dependencies": {
     "@chat-adapter/shared": "^4.32.0",
@@ -41,7 +35,6 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.2",
-    "@spectrum-ts/imessage-local": "10.0.0",
     "@types/mime-types": "^3.0.1",
     "@types/node": "^22.20.0",
     "@vitest/coverage-v8": "^4.1.9",
