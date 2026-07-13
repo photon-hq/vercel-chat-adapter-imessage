@@ -377,10 +377,16 @@ function textMessagePayload(
     direction?: "inbound" | "outbound";
     text?: string;
     content?: unknown;
+    phone?: string;
   } = {}
 ): Record<string, unknown> {
   const chatGuid = overrides.chatGuid ?? "iMessage;-;+1234567890";
-  const space = { id: chatGuid, platform: "iMessage", type: "dm" };
+  const space = {
+    id: chatGuid,
+    platform: "iMessage",
+    type: "dm",
+    ...(overrides.phone ? { phone: overrides.phone } : {}),
+  };
   return {
     event: "messages",
     space,
@@ -600,6 +606,25 @@ describe("encodeThreadId / decodeThreadId / isDM", () => {
     expect(adapter.decodeThreadId(threadId)).toEqual({
       chatGuid: "iMessage;-;+1234567890",
     });
+  });
+
+  it("round-trips the sending line encoded in the thread ID", () => {
+    const adapter = localAdapter();
+    const threadId = adapter.encodeThreadId({
+      chatGuid: "iMessage;-;+1234567890",
+      phone: "+15550001111",
+    });
+    expect(threadId).toBe("imessage:iMessage;-;+1234567890~+15550001111");
+    expect(adapter.decodeThreadId(threadId)).toEqual({
+      chatGuid: "iMessage;-;+1234567890",
+      phone: "+15550001111",
+    });
+  });
+
+  it("decodes a legacy thread ID (no line) without a phone", () => {
+    expect(
+      localAdapter().decodeThreadId("imessage:iMessage;-;+1234567890")
+    ).toEqual({ chatGuid: "iMessage;-;+1234567890" });
   });
 
   it("throws on a thread ID from another adapter", () => {
@@ -1046,6 +1071,80 @@ describe("postMessage", () => {
     await expect(
       adapter.postMessage("imessage:iMessage;+;chatUNSEEN", "Hi")
     ).rejects.toThrow(NotImplementedError);
+  });
+
+  it("rebuilds an uncached webhook thread on the sending line the delivery named", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    // A webhook delivery caches no live Space, only the sending line (phone).
+    const chatGuid = "iMessage;-;+1234567890";
+    await adapter.handleWebhook(
+      signedWebhookRequest({
+        body: textMessagePayload({ chatGuid, phone: "+15550001111" }),
+      })
+    );
+
+    const rebuilt = makeSpace(chatGuid, "dm", { id: "wh-reply-1" });
+    const spaceResolver = vi.fn(async () => rebuilt);
+    mockImessage.mockReturnValue({ space: { get: spaceResolver } });
+
+    const result = await adapter.postMessage(`imessage:${chatGuid}`, "Hi");
+
+    // With multiple lines configured, `space.get` needs the phone to pick one.
+    expect(spaceResolver).toHaveBeenCalledWith(chatGuid, {
+      phone: "+15550001111",
+    });
+    expect(rebuilt.send).toHaveBeenCalledWith({ __kind: "text", text: "Hi" });
+    expect(result.id).toBe("wh-reply-1");
+  });
+
+  it("posts a reply without initialize() by building the app on demand", async () => {
+    // The reported production bug: eve's workflow reply callback (message.completed
+    // → postMessage) runs in an invocation where initialize() never ran, so the
+    // adapter must build its Spectrum app on demand instead of throwing.
+    const adapter = cloudAdapter();
+    // Deliberately NO init(adapter).
+
+    const chatGuid = "iMessage;-;+12094503665";
+    const rebuilt = makeSpace(chatGuid, "dm", { id: "cold-init-1" });
+    mockImessage.mockReturnValue({
+      space: { get: vi.fn(async () => rebuilt) },
+    });
+
+    const result = await adapter.postMessage(
+      `imessage:${chatGuid}~shared`,
+      "Hi"
+    );
+
+    expect(mockSpectrum).toHaveBeenCalled();
+    expect(rebuilt.send).toHaveBeenCalledWith({ __kind: "text", text: "Hi" });
+    expect(result.id).toBe("cold-init-1");
+  });
+
+  it("rebuilds a cold-cache thread from the line encoded in the thread ID", async () => {
+    // Simulates the Vercel Workflow reply callback: a *separate* invocation with
+    // an empty cache. The only carried-over state is the thread ID, which must
+    // encode the sending line so the rebuild picks the right one.
+    const adapter = cloudAdapter();
+    await init(adapter);
+
+    const chatGuid = "iMessage;-;+1234567890";
+    const rebuilt = makeSpace(chatGuid, "dm", { id: "wf-reply-1" });
+    const spaceResolver = vi.fn(async () => rebuilt);
+    mockImessage.mockReturnValue({ space: { get: spaceResolver } });
+
+    // No inbound was processed in this "process" — cache is cold.
+    const result = await adapter.postMessage(
+      `imessage:${chatGuid}~+15550001111`,
+      "Hi"
+    );
+
+    expect(spaceResolver).toHaveBeenCalledWith(chatGuid, {
+      phone: "+15550001111",
+    });
+    expect(rebuilt.send).toHaveBeenCalledWith({ __kind: "text", text: "Hi" });
+    expect(result.id).toBe("wf-reply-1");
   });
 
   it("throws when there is nothing to send (empty text, no files)", async () => {
@@ -1919,11 +2018,14 @@ describe("openDM", () => {
     expect(created.send).toHaveBeenCalled();
   });
 
-  it("throws when the adapter is not initialized", async () => {
+  it("lazily builds the app when eve invokes it without initialize()", async () => {
+    // Simulates a cold Vercel Workflow reply invocation: eve constructs the
+    // adapter from config but never runs initialize(), so the app must be
+    // built on demand rather than throwing.
     const adapter = cloudAdapter();
-    await expect(adapter.openDM("+15551234567")).rejects.toThrow(
-      NotImplementedError
-    );
+    const threadId = await adapter.openDM("+15551234567");
+    expect(mockSpectrum).toHaveBeenCalled();
+    expect(threadId).toBe("imessage:iMessage;-;+15551234567");
   });
 });
 

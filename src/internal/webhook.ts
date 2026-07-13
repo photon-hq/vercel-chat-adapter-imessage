@@ -104,6 +104,7 @@ export function buildChatMessageFromWebhook(
     content: message.content as unknown as SpectrumContent,
     senderId: message.sender?.id ?? "",
     isOutbound: message.direction === "outbound",
+    phone: space.phone ?? message.space?.phone,
     timestamp: message.timestamp ? new Date(message.timestamp) : new Date(),
     raw: message,
   });

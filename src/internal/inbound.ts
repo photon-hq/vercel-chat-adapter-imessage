@@ -16,6 +16,8 @@ export interface InboundMessageFields {
   content: SpectrumContent;
   id: string;
   isOutbound: boolean;
+  /** The iMessage line this delivery arrived on, when the source exposes it. */
+  phone?: string;
   raw: unknown;
   senderId: string;
   timestamp: Date;
@@ -29,7 +31,7 @@ export function buildChatMessageFromFields(
 
   return new Message({
     id: fields.id,
-    threadId: encodeThreadId({ chatGuid: fields.chatGuid }),
+    threadId: encodeThreadId({ chatGuid: fields.chatGuid, phone: fields.phone }),
     text,
     formatted: parseMarkdown(text),
     author: {
@@ -62,6 +64,7 @@ export function buildChatMessage(
     content: message.content,
     senderId: message.sender?.id ?? "",
     isOutbound: message.direction === "outbound",
+    phone: (space as { phone?: string }).phone,
     timestamp: message.timestamp,
     raw: message,
   });

@@ -82,8 +82,10 @@ export class iMessageAdapter implements Adapter {
   readonly phone?: string;
   readonly webhookSecret?: string;
 
-  /** The spectrum-ts instance — null until `initialize()` runs. */
+  /** The spectrum-ts instance — null until `initialize()` or `ensureApp()` runs. */
   app: SpectrumInstance | null = null;
+  /** In-flight app build, so concurrent callers share one construction. */
+  private appBuild: Promise<void> | null = null;
 
   private chat: ChatInstance | null = null;
   private readonly logger: Logger;
@@ -122,7 +124,38 @@ export class iMessageAdapter implements Adapter {
 
   async initialize(chat: ChatInstance): Promise<void> {
     this.chat = chat;
+    await this.ensureApp();
 
+    this.pump = new MessagePump(
+      () => {
+        if (!this.app) {
+          throw new Error("Adapter not initialized");
+        }
+        return this.app.messages;
+      },
+      (space, message) =>
+        this.routeInbound(space, message, this.gatewayOptions),
+      this.logger
+    );
+  }
+
+  /**
+   * Build the spectrum-ts app on demand. eve may call the adapter in an
+   * invocation that never ran `initialize()` (e.g. a Vercel Workflow reply
+   * callback), leaving `this.app` null — every send funnels through here first.
+   */
+  private async ensureApp(): Promise<void> {
+    if (this.app) {
+      return;
+    }
+    this.appBuild ??= this.buildApp().catch((error) => {
+      this.appBuild = null;
+      throw error;
+    });
+    await this.appBuild;
+  }
+
+  private async buildApp(): Promise<void> {
     const { providerConfig, projectId, projectSecret } = resolveSpectrumConfig(
       this.local,
       {
@@ -140,18 +173,6 @@ export class iMessageAdapter implements Adapter {
       projectId && projectSecret
         ? await Spectrum({ providers, projectId, projectSecret })
         : await Spectrum({ providers });
-
-    this.pump = new MessagePump(
-      () => {
-        if (!this.app) {
-          throw new Error("Adapter not initialized");
-        }
-        return this.app.messages;
-      },
-      (space, message) =>
-        this.routeInbound(space, message, this.gatewayOptions),
-      this.logger
-    );
 
     let mode: "local" | "cloud" | "self-host";
     if (this.local) {
@@ -605,6 +626,7 @@ export class iMessageAdapter implements Adapter {
    * thread id, ready to pass to `postMessage`.
    */
   async openDM(userId: string): Promise<string> {
+    await this.ensureApp();
     if (!this.app) {
       throw new NotImplementedError(
         "openDM requires the adapter to be initialized",
@@ -614,7 +636,10 @@ export class iMessageAdapter implements Adapter {
 
     const space = await this.platformSpaces().create(userId);
     this.cache.rememberSpace(space);
-    return encodeThreadId({ chatGuid: space.id });
+    return encodeThreadId({
+      chatGuid: space.id,
+      phone: (space as { phone?: string }).phone,
+    });
   }
 
   /**
@@ -769,6 +794,9 @@ export class iMessageAdapter implements Adapter {
     }
 
     const { message, space } = payload;
+    // No live Space to cache — remember the sending line so a later rebuild
+    // picks the right one when several are configured.
+    this.cache.rememberPhone(space.id, space.phone ?? message.space?.phone);
     // Parity with the gateway path: surface only inbound text/attachment
     // messages — skip the bot's own echoes and inbound reactions.
     if (message.direction === "outbound") {
@@ -866,30 +894,31 @@ export class iMessageAdapter implements Adapter {
   }
 
   /**
-   * Resolve a sendable spectrum-ts `Space` for a thread.
-   *
-   * Prefers a live `Space` cached from the inbound stream (correct sending
-   * line, no extra round-trip). On a miss — e.g. a webhook-only deployment, or
-   * a cold send — it rebuilds the Space from the chat GUID via
-   * `imessage(app).space.get(chatGuid)`, which works for DMs and groups alike.
-   * The rebuild can still fail when several iMessage lines are configured and
-   * spectrum-ts cannot infer which line the chat belongs to (`space.get`
-   * requires `params.phone` there). Returns `undefined` when no Space can be
-   * obtained.
+   * Resolve a sendable spectrum-ts `Space` for a thread. Prefers a cached live
+   * Space; otherwise rebuilds it from the chat GUID, passing the sending line
+   * so `space.get` can pick it when multiple lines are configured. Returns
+   * `undefined` when no Space can be obtained.
    */
   private async resolveSpace(
     threadId: string
   ): Promise<SpectrumSpace | undefined> {
-    const { chatGuid } = decodeThreadId(threadId);
+    const { chatGuid, phone: threadPhone } = decodeThreadId(threadId);
     const cached = this.cache.getSpace(chatGuid);
     if (cached) {
       return cached;
     }
+    await this.ensureApp();
     if (!this.app) {
       return;
     }
     try {
-      const space = await this.platformSpaces().get(chatGuid);
+      // Prefer the line from the thread ID (survives across invocations), then
+      // one learned from an inbound delivery in this process.
+      const phone = threadPhone ?? this.cache.getPhone(chatGuid);
+      const spaces = this.platformSpaces();
+      const space = phone
+        ? await spaces.get(chatGuid, { phone })
+        : await spaces.get(chatGuid);
       this.cache.rememberSpace(space);
       return space;
     } catch (error) {
@@ -907,7 +936,10 @@ export class iMessageAdapter implements Adapter {
    * types as `never` — cast to the slice of the instance we use.
    */
   private platformSpaces(): {
-    get(id: string): Promise<SpectrumSpace>;
+    get(
+      id: string,
+      params?: { phone: string }
+    ): Promise<SpectrumSpace>;
     create(users: string): Promise<SpectrumSpace>;
   } {
     if (!this.app) {
@@ -916,7 +948,10 @@ export class iMessageAdapter implements Adapter {
     return (
       imessage(this.app) as unknown as {
         space: {
-          get(id: string): Promise<SpectrumSpace>;
+          get(
+            id: string,
+            params?: { phone: string }
+          ): Promise<SpectrumSpace>;
           create(users: string): Promise<SpectrumSpace>;
         };
       }
