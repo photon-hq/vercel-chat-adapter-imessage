@@ -44,6 +44,12 @@ bot.onNewMention(async (thread, message) => {
 
 For development or self-hosted deployments on a Mac. Reads from the local iMessage database and sends via the on-device APIs. Must run on macOS with **Full Disk Access** granted.
 
+Local mode needs the optional [`@spectrum-ts/imessage-local`](https://www.npmjs.com/package/@spectrum-ts/imessage-local) package.
+
+```bash
+pnpm add @spectrum-ts/imessage-local
+```
+
 ```typescript
 import { Chat } from "chat";
 import { createiMessageAdapter } from "@photon-ai/chat-adapter-imessage";
@@ -93,9 +99,9 @@ createiMessageAdapter({
 
 Local mode requires running directly on a macOS machine with iMessage. It uses Apple's native APIs — reading from the local `chat.db` and sending on-device — with no external server.
 
-1. Grant **Full Disk Access** to your terminal or application in **System Settings → Privacy & Security → Full Disk Access**.
-2. Ensure iMessage is signed in and working on the Mac.
-3. No additional environment variables are required — local mode is the default.
+1. Install the optional local provider: `pnpm add @spectrum-ts/imessage-local`.
+2. Grant **Full Disk Access** to your terminal or application in **System Settings → Privacy & Security → Full Disk Access**.
+3. Ensure iMessage is signed in and working on the Mac.
 
 ## Receiving messages
 
