@@ -69,7 +69,7 @@ createiMessageAdapter({
 There are two ways to receive inbound messages:
 
 - **Webhooks** (recommended for serverless) — Spectrum Cloud delivers each message to an HTTPS endpoint as signed JSON. No long-lived connection or cron job. Remote (cloud) mode only.
-- **Gateway listener** — `startGatewayListener()` consumes spectrum-ts's message stream in real time. Works in all modes; in serverless it needs a cron job to stay connected.
+- **Gateway listener** — `startGatewayListener()` consumes spectrum-ts's message stream in real time. Works in cloud and self-hosted modes; in serverless it needs a cron job to stay connected.
 
 ## Webhooks
 
@@ -381,7 +381,7 @@ Pass the literal `"clear"` to remove the current background, in-memory image byt
 
 This version re-platforms the adapter onto **spectrum-ts**. If you are upgrading:
 
-- **Local (on-device) mode removed** — `local: true` and `IMESSAGE_LOCAL` now throw. Use Spectrum Cloud or a self-hosted gRPC endpoint; `local: false` is still accepted as a no-op.
+- **Local (on-device) mode removed** — `local: true`, and `IMESSAGE_LOCAL` set to any value other than `"false"`, now throw. Use Spectrum Cloud or a self-hosted gRPC endpoint; `local: false` and `IMESSAGE_LOCAL=false` are still accepted as no-ops.
 - **Dependency** — replaces `@photon-ai/imessage-kit` + `@photon-ai/advanced-imessage-kit` with `spectrum-ts`.
 - **`IMESSAGE_SERVER_URL` is now a gRPC `host:port`** (self-host), not an `https://` / Socket.IO URL.
 - **New cloud path** — set `IMESSAGE_PROJECT_ID` + `IMESSAGE_PROJECT_SECRET` for Spectrum Cloud.
@@ -397,7 +397,7 @@ This version re-platforms the adapter onto **spectrum-ts**. If you are upgrading
 
 ### "Local (on-device) mode was removed"
 
-- The adapter no longer runs against the on-device Messages database. Remove `local: true` / `IMESSAGE_LOCAL` and provide cloud or self-host credentials instead.
+- The adapter no longer runs against the on-device Messages database. Remove `local: true` (and any `IMESSAGE_LOCAL` value other than `"false"`, which is still accepted as a no-op) and provide cloud or self-host credentials instead.
 
 ### Self-host connection issues
 
