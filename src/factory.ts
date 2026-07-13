@@ -14,8 +14,12 @@ const LOCAL_MODE_REMOVED =
  * (the legacy "remote" opt-out, still accepted as a no-op).
  */
 function rejectLocalMode(explicit: boolean | undefined): void {
+  if (explicit === false) {
+    return; // explicit `local: false` beats any IMESSAGE_LOCAL env signal
+  }
   const env = process.env.IMESSAGE_LOCAL;
-  if (explicit === true || (explicit === undefined && env && env !== "false")) {
+  const wantsLocal = explicit ?? Boolean(env && env !== "false");
+  if (wantsLocal) {
     throw new ValidationError("imessage", LOCAL_MODE_REMOVED);
   }
 }
