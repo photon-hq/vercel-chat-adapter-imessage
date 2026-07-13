@@ -15,6 +15,9 @@ const DEFAULT_MAX_MESSAGES = 1024;
 export class InboundCache {
   private readonly spaces = new Map<string, SpectrumSpace>();
   private readonly messages = new Map<string, SpectrumMessage>();
+  /** Sending line last seen per chat GUID — a hint for rebuilding an uncached
+   * Space on the right line when several are configured. */
+  private readonly phones = new Map<string, string>();
   /**
    * Reaction messages this session sent via `addReaction`, keyed by their
    * target so `removeReaction` can `unsend()` them. spectrum-ts models a
@@ -56,6 +59,19 @@ export class InboundCache {
 
   getSpace(chatGuid: string): SpectrumSpace | undefined {
     return this.spaces.get(chatGuid);
+  }
+
+  /** Record the sending line seen for a chat GUID, if the delivery carried one. */
+  rememberPhone(chatGuid: string, phone: string | undefined): void {
+    if (!phone) {
+      return;
+    }
+    this.phones.set(chatGuid, phone);
+    evict(this.phones, this.maxSpaces);
+  }
+
+  getPhone(chatGuid: string): string | undefined {
+    return this.phones.get(chatGuid);
   }
 
   getMessage(id: string): SpectrumMessage | undefined {

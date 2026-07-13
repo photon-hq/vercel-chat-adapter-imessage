@@ -4,6 +4,11 @@ import type { SelectOptionElement } from "chat";
 export interface iMessageThreadId {
   /** Chat GUID (e.g., "iMessage;-;+1234567890") */
   chatGuid: string;
+  /**
+   * Sending line, when known — encoded in the thread ID so it survives a
+   * cold-cache reply invocation where the Space must be rebuilt.
+   */
+  phone?: string;
 }
 
 /**
