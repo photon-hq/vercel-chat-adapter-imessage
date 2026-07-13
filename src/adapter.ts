@@ -70,6 +70,21 @@ import { resolveVoice, type VoiceInput, type VoiceOptions } from "./voice";
 
 const TYPING_DURATION_MS = 3000;
 
+/**
+ * Content types that describe conversation events, not user messages.
+ * spectrum-ts v9+ surfaces group membership changes, renames, and avatar
+ * updates on `app.messages` (and in webhook deliveries) as inbound messages;
+ * forwarding them to the Chat SDK would surface phantom empty-text messages.
+ */
+const EVENT_CONTENT_TYPES = new Set([
+  "addMember",
+  "removeMember",
+  "leaveSpace",
+  "rename",
+  "avatar",
+  "typing",
+]);
+
 export class iMessageAdapter implements Adapter {
   readonly name = "imessage";
   readonly userName: string = "";
@@ -704,6 +719,9 @@ export class iMessageAdapter implements Adapter {
     if (message.content?.type === "reaction") {
       return;
     }
+    if (message.content?.type && EVENT_CONTENT_TYPES.has(message.content.type)) {
+      return;
+    }
 
     const chatMessage = buildChatMessageFromWebhook(message, space);
     this.chat.processMessage(this, chatMessage.threadId, chatMessage, options);
@@ -728,6 +746,9 @@ export class iMessageAdapter implements Adapter {
     if (contentType === "reaction") {
       // Inbound reactions are not surfaced to Chat SDK (parity with the
       // previous adapter, which only forwarded text/attachment messages).
+      return;
+    }
+    if (EVENT_CONTENT_TYPES.has(contentType)) {
       return;
     }
     if (message.direction === "outbound") {

@@ -778,6 +778,21 @@ describe("handleWebhook", () => {
     expect(mockChat.processMessage).not.toHaveBeenCalled();
   });
 
+  it("ignores group-event deliveries (rename, membership, avatar)", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    for (const type of ["rename", "addMember", "removeMember", "avatar"]) {
+      const response = await adapter.handleWebhook(
+        signedWebhookRequest({
+          body: textMessagePayload({ content: { type } }),
+        })
+      );
+      expect(response.status).toBe(200);
+    }
+    expect(mockChat.processMessage).not.toHaveBeenCalled();
+  });
+
   it("lets the bot reply to a webhook-delivered DM", async () => {
     const adapter = webhookAdapter();
     await init(adapter);
@@ -887,6 +902,32 @@ describe("startGatewayListener", () => {
       adapter,
       expect.any(String),
       expect.objectContaining({ text: "theirs" }),
+      expect.anything()
+    );
+  });
+
+  // spectrum-ts v9+ delivers group events (membership, rename, avatar) on
+  // app.messages — they must not surface to the bot as phantom messages.
+  it("ignores inbound group-event content (rename, membership, avatar)", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const space = makeSpace("chat-group-1", "group");
+    await startTrackedListener(adapter);
+
+    pushInbound([space, makeMessage("ev-1", space, { type: "rename" })]);
+    pushInbound([space, makeMessage("ev-2", space, { type: "addMember" })]);
+    pushInbound([space, makeMessage("ev-3", space, { type: "avatar" })]);
+    pushInbound([
+      space,
+      makeMessage("in-4", space, { type: "text", text: "real one" }),
+    ]);
+
+    await vi.waitFor(() => expect(mockChat.processMessage).toHaveBeenCalled());
+    expect(mockChat.processMessage).toHaveBeenCalledTimes(1);
+    expect(mockChat.processMessage).toHaveBeenCalledWith(
+      adapter,
+      expect.any(String),
+      expect.objectContaining({ text: "real one" }),
       expect.anything()
     );
   });
