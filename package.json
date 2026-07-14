@@ -1,6 +1,6 @@
 {
   "name": "@photon-ai/chat-adapter-imessage",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "iMessage adapter for Chat SDK",
   "type": "module",
   "main": "./dist/index.js",
