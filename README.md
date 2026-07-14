@@ -382,7 +382,7 @@ Pass the literal `"clear"` to remove the current background, in-memory image byt
 This version re-platforms the adapter onto **spectrum-ts**. If you are upgrading:
 
 - **Local (on-device) mode removed** — `local: true`, and `IMESSAGE_LOCAL` set to any value other than `"false"`, now throw. Use Spectrum Cloud or a self-hosted gRPC endpoint; `local: false` and `IMESSAGE_LOCAL=false` are still accepted as no-ops.
-- **Dependency** — replaces `@photon-ai/imessage-kit` + `@photon-ai/advanced-imessage-kit` with `@spectrum-ts/core` + `@spectrum-ts/imessage` (not the full `spectrum-ts` umbrella).
+- **Dependency** — replaces `@photon-ai/imessage-kit` + `@photon-ai/advanced-imessage-kit` with `@spectrum-ts/core` + `@spectrum-ts/imessage`
 - **`IMESSAGE_SERVER_URL` is now a gRPC `host:port`** (self-host), not an `https://` / Socket.IO URL.
 - **New cloud path** — set `IMESSAGE_PROJECT_ID` + `IMESSAGE_PROJECT_SECRET` for Spectrum Cloud.
 - **Unsupported capabilities** (throw `NotImplementedError`): `fetchMessages` and `fetchThread` — spectrum-ts exposes no paginated history or chat-info API. Cold `postMessage` works for DMs and groups alike (rebuilt from the chat GUID — see [Limitations](#limitations)).
