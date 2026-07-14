@@ -1,10 +1,10 @@
 import { ValidationError } from "@chat-adapter/shared";
 import type { FileUpload } from "chat";
-import type { AppUrl } from "spectrum-ts";
-import type { CustomizedMiniAppInput } from "spectrum-ts/providers/imessage";
+import type { AppUrl } from "@spectrum-ts/core";
+import type { CustomizedMiniAppInput } from "@spectrum-ts/imessage";
 
-export type { AppUrl } from "spectrum-ts";
-export type { CustomizedMiniAppInput } from "spectrum-ts/providers/imessage";
+export type { AppUrl } from "@spectrum-ts/core";
+export type { CustomizedMiniAppInput } from "@spectrum-ts/imessage";
 
 /**
  * Image bytes for a mini-app card's inline image. Accepts raw bytes

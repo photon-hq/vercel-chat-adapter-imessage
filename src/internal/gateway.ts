@@ -2,7 +2,7 @@ import type { Logger } from "chat";
 import type {
   Message as SpectrumMessage,
   Space as SpectrumSpace,
-} from "spectrum-ts";
+} from "@spectrum-ts/core";
 
 type InboundTuple = [SpectrumSpace, SpectrumMessage];
 

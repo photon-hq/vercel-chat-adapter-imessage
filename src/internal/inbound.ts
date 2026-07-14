@@ -3,7 +3,7 @@ import type {
   Content as SpectrumContent,
   Message as SpectrumMessage,
   Space as SpectrumSpace,
-} from "spectrum-ts";
+} from "@spectrum-ts/core";
 import { encodeThreadId, isDMChatGuid } from "./thread";
 
 /**

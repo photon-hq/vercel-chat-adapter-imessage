@@ -1,7 +1,7 @@
 import { ValidationError } from "@chat-adapter/shared";
 import type { FileUpload } from "chat";
 import { lookup as lookupMimeType } from "mime-types";
-import { type ContentBuilder, voice as voiceContent } from "spectrum-ts";
+import { type ContentBuilder, voice as voiceContent } from "@spectrum-ts/core";
 
 /**
  * Audio bytes for a voice message. Accepts raw bytes (`Uint8Array` / `Buffer` /
