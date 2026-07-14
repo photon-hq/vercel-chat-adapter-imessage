@@ -1,7 +1,7 @@
 import { ValidationError } from "@chat-adapter/shared";
 import type { EmojiValue, FileUpload } from "chat";
 import { lookup as lookupMimeType } from "mime-types";
-import { attachment, type ContentBuilder } from "spectrum-ts";
+import { attachment, type ContentBuilder } from "@spectrum-ts/core";
 
 const EMOJI_GLYPHS: Record<string, string> = {
   heart: "❤️",

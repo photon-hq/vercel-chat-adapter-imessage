@@ -30,8 +30,9 @@
   },
   "dependencies": {
     "@chat-adapter/shared": "^4.32.0",
-    "mime-types": "^3.0.2",
-    "spectrum-ts": "10.0.0"
+    "@spectrum-ts/core": "10.0.0",
+    "@spectrum-ts/imessage": "10.0.0",
+    "mime-types": "^3.0.2"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.2",

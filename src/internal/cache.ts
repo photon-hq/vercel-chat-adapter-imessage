@@ -1,7 +1,7 @@
 import type {
   Message as SpectrumMessage,
   Space as SpectrumSpace,
-} from "spectrum-ts";
+} from "@spectrum-ts/core";
 
 const DEFAULT_MAX_SPACES = 256;
 const DEFAULT_MAX_MESSAGES = 1024;

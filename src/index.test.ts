@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---------------------------------------------------------------------------
-// Mocks: spectrum-ts + its iMessage provider. Content builders are replaced
-// with inspectable passthroughs so we can assert on what was sent.
+// Mocks: @spectrum-ts/core + @spectrum-ts/imessage. Content builders are
+// replaced with inspectable passthroughs so we can assert on what was sent.
 // ---------------------------------------------------------------------------
 
 const { mockSpectrum, mockImessageConfig, mockImessage } = vi.hoisted(() => ({
@@ -11,7 +11,7 @@ const { mockSpectrum, mockImessageConfig, mockImessage } = vi.hoisted(() => ({
   mockImessage: vi.fn(),
 }));
 
-vi.mock("spectrum-ts", () => ({
+vi.mock("@spectrum-ts/core", () => ({
   Spectrum: mockSpectrum,
   text: (t: string) => ({ __kind: "text", text: t }),
   markdown: (m: string) => ({ __kind: "markdown", markdown: m }),
@@ -33,7 +33,7 @@ vi.mock("spectrum-ts", () => ({
   }),
 }));
 
-vi.mock("spectrum-ts/providers/imessage", () => ({
+vi.mock("@spectrum-ts/imessage", () => ({
   imessage: Object.assign(mockImessage, {
     config: mockImessageConfig,
     effect: {

@@ -10,7 +10,7 @@ export default defineConfig({
     "chat",
     "@chat-adapter/shared",
     "mime-types",
-    "spectrum-ts",
-    "spectrum-ts/providers/imessage",
+    "@spectrum-ts/core",
+    "@spectrum-ts/imessage",
   ],
 });

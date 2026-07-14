@@ -1,8 +1,8 @@
 import { ValidationError } from "@chat-adapter/shared";
-import type { IMessageMessageEffect } from "spectrum-ts/providers/imessage";
-import { imessage } from "spectrum-ts/providers/imessage";
+import type { IMessageMessageEffect } from "@spectrum-ts/imessage";
+import { imessage } from "@spectrum-ts/imessage";
 
-export type { IMessageMessageEffect } from "spectrum-ts/providers/imessage";
+export type { IMessageMessageEffect } from "@spectrum-ts/imessage";
 
 /**
  * iMessage expressive-send effects, keyed by friendly name. Bubble effects

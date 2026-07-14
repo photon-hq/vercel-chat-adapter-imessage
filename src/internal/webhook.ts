@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { Message } from "chat";
-import type { Content as SpectrumContent } from "spectrum-ts";
+import type { Content as SpectrumContent } from "@spectrum-ts/core";
 import { buildChatMessageFromFields } from "./inbound";
 
 /**

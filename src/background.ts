@@ -1,8 +1,8 @@
 import { ValidationError } from "@chat-adapter/shared";
 import type { FileUpload } from "chat";
 import { lookup as lookupMimeType } from "mime-types";
-import type { ContentBuilder } from "spectrum-ts";
-import { background as backgroundContent } from "spectrum-ts/providers/imessage";
+import type { ContentBuilder } from "@spectrum-ts/core";
+import { background as backgroundContent } from "@spectrum-ts/imessage";
 
 /**
  * Image bytes for a chat background. Accepts raw bytes (`Uint8Array` / `Buffer`

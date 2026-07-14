@@ -27,12 +27,12 @@ import {
   type Message as SpectrumMessage,
   type Space as SpectrumSpace,
   text as textContent,
-} from "spectrum-ts";
+} from "@spectrum-ts/core";
 import {
   customizedMiniApp,
   effect as effectContent,
   imessage,
-} from "spectrum-ts/providers/imessage";
+} from "@spectrum-ts/imessage";
 import {
   type BackgroundInput,
   type BackgroundOptions,
