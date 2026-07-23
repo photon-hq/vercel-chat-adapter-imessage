@@ -38,7 +38,11 @@ import {
   type BackgroundOptions,
   resolveBackground,
 } from "./background";
-import { type iMessageAdapterConfig, resolveSpectrumConfig } from "./config";
+import {
+  type iMessageAdapterConfig,
+  type iMessageCredentialProvider,
+  resolveSpectrumConfig,
+} from "./config";
 import {
   type IMessageMessageEffect,
   type iMessageEffectName,
@@ -93,7 +97,6 @@ export class iMessageAdapter implements Adapter {
   readonly projectId?: string;
   readonly projectSecret?: string;
   readonly clients?: IMessageClientEntry[];
-  readonly credentials?: iMessageAdapterConfig["credentials"];
   readonly phone?: string;
   readonly webhookSecret?: string;
 
@@ -103,6 +106,7 @@ export class iMessageAdapter implements Adapter {
   private appBuild: Promise<void> | null = null;
 
   private chat: ChatInstance | null = null;
+  private readonly credentialProvider?: iMessageCredentialProvider;
   private readonly logger: Logger;
   private readonly formatConverter = new iMessageFormatConverter();
   private readonly cache = new InboundCache();
@@ -121,7 +125,7 @@ export class iMessageAdapter implements Adapter {
     }
 
     this.logger = config.logger;
-    this.credentials = config.credentials;
+    this.credentialProvider = config.credentials;
     this.serverUrl = config.serverUrl;
     this.apiKey = config.apiKey;
     this.projectId = config.projectId;
@@ -168,7 +172,7 @@ export class iMessageAdapter implements Adapter {
   }
 
   private async buildApp(): Promise<void> {
-    const credentials = await this.credentials?.();
+    const credentials = await this.credentialProvider?.();
     const { providerConfig, projectId, projectSecret } = resolveSpectrumConfig({
       apiKey: this.apiKey,
       clients: this.clients,
