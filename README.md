@@ -66,15 +66,7 @@ createiMessageAdapter({
 
 ## Receiving messages
 
-There are two ways to receive inbound messages.
-
-Inbound tapbacks are emitted through Chat SDK's reaction events in both modes.
-The six standard iMessage tapbacks normalize to `heart`, `thumbs_up`,
-`thumbs_down`, `laugh`, `exclamation`, and `question`. Other reaction strings
-pass through unchanged when Spectrum exposes them. Outbound/self reactions are
-ignored. Inbound reaction removal is not currently surfaced: Spectrum models it
-as an unsend, and its inbound message payload does not expose the original
-reaction relationship needed to translate it reliably.
+There are two ways to receive inbound messages:
 
 - **Webhooks** (recommended for serverless) — Spectrum Cloud delivers each message to an HTTPS endpoint as signed JSON. No long-lived connection or cron job. Remote (cloud) mode only.
 - **Gateway listener** — `startGatewayListener()` consumes spectrum-ts's message stream in real time. Works in cloud and self-hosted modes; in serverless it needs a cron job to stay connected.
