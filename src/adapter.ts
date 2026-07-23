@@ -49,7 +49,11 @@ import { MessagePump } from "./internal/gateway";
 import { buildChatMessage } from "./internal/inbound";
 import { ModalPollRegistry } from "./internal/modals";
 import { fileToAttachment } from "./internal/outbound";
-import { buildInboundReaction, emojiToTapback } from "./internal/tapbacks";
+import {
+  buildInboundReaction,
+  emojiToTapback,
+  getReactionTargetId,
+} from "./internal/tapbacks";
 import {
   decodeThreadId,
   encodeThreadId,
@@ -718,9 +722,10 @@ export class iMessageAdapter implements Adapter {
     if (message.content?.type === "reaction") {
       const { emoji, target } = message.content as {
         emoji?: unknown;
-        target?: { id?: unknown };
+        target?: { id?: unknown; parentId?: unknown };
       };
-      if (typeof emoji !== "string" || typeof target?.id !== "string") {
+      const messageId = target && getReactionTargetId(target);
+      if (typeof emoji !== "string" || !messageId) {
         this.logger.debug("Skipping malformed inbound iMessage reaction");
         return;
       }
@@ -728,7 +733,7 @@ export class iMessageAdapter implements Adapter {
         {
           chatGuid: space.id,
           emoji,
-          messageId: target.id,
+          messageId,
           phone: space.phone ?? message.space?.phone,
           raw: message,
           senderId: message.sender?.id,
@@ -760,11 +765,11 @@ export class iMessageAdapter implements Adapter {
     this.cache.remember(space, message);
 
     const contentType = message.content.type;
-    if (message.direction === "outbound") {
-      return;
-    }
     if (contentType === "poll_option") {
       this.handlePollOption(space, message, options);
+      return;
+    }
+    if (message.direction === "outbound") {
       return;
     }
     if (contentType === "reaction") {
@@ -772,7 +777,9 @@ export class iMessageAdapter implements Adapter {
         {
           chatGuid: space.id,
           emoji: message.content.emoji,
-          messageId: message.content.target.id,
+          messageId:
+            getReactionTargetId(message.content.target) ??
+            message.content.target.id,
           phone: (space as { phone?: string }).phone,
           raw: message,
           senderId: message.sender?.id,

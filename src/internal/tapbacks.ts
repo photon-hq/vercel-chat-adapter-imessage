@@ -24,7 +24,10 @@ const NAME_TO_GLYPH = new Map<string, string>(
   )
 );
 
-const SUPPORTED_NAMES = STANDARD_TAPBACKS.map(({ name }) => name).join(", ");
+const SUPPORTED_NAMES = STANDARD_TAPBACKS.flatMap(({ aliases, name }) => [
+  name,
+  ...aliases,
+]).join(", ");
 
 /**
  * Normalize a standard iMessage tapback to its cross-platform Chat SDK name.
@@ -33,6 +36,17 @@ const SUPPORTED_NAMES = STANDARD_TAPBACKS.map(({ name }) => name).join(", ");
  */
 export function tapbackToEmoji(rawEmoji: string): EmojiValue {
   return getEmoji(GLYPH_TO_NAME.get(rawEmoji) ?? rawEmoji);
+}
+
+/** Prefer the parent surfaced to Chat SDK over a multipart child message ID. */
+export function getReactionTargetId(target: {
+  id?: unknown;
+  parentId?: unknown;
+}): string | undefined {
+  if (typeof target.parentId === "string") {
+    return target.parentId;
+  }
+  return typeof target.id === "string" ? target.id : undefined;
 }
 
 /** Build the common Chat SDK fields for an inbound iMessage reaction. */
