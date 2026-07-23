@@ -2279,12 +2279,16 @@ describe("createiMessageAdapter", () => {
     expect(adapter.projectId).toBe("p");
   });
 
-  it("resolves lazy cloud credentials on initialization", async () => {
+  it("atomically prefers lazy cloud credentials on initialization", async () => {
     const credentials = vi.fn(async () => ({
       projectId: "lazy-project",
       projectSecret: "lazy-secret",
     }));
-    const adapter = createiMessageAdapter({ credentials });
+    const adapter = createiMessageAdapter({
+      credentials,
+      projectId: "static-project",
+      projectSecret: "static-secret",
+    });
 
     expect(credentials).not.toHaveBeenCalled();
     await init(adapter);
@@ -2296,6 +2300,21 @@ describe("createiMessageAdapter", () => {
         projectSecret: "lazy-secret",
       })
     );
+  });
+
+  it("does not combine partial provider credentials with static credentials", async () => {
+    const credentials = vi.fn(async () => ({
+      projectId: undefined,
+      projectSecret: "lazy-secret",
+    }));
+    const adapter = createiMessageAdapter({
+      credentials: credentials as never,
+      projectId: "static-project",
+      projectSecret: "static-secret",
+    });
+
+    await expect(init(adapter)).rejects.toThrow(ValidationError);
+    expect(mockSpectrum).not.toHaveBeenCalled();
   });
 
   it("shares one lazy credential lookup across concurrent initialization", async () => {

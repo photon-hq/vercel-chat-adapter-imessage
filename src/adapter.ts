@@ -173,8 +173,10 @@ export class iMessageAdapter implements Adapter {
       apiKey: this.apiKey,
       clients: this.clients,
       phone: this.phone,
-      projectId: credentials?.projectId ?? this.projectId,
-      projectSecret: credentials?.projectSecret ?? this.projectSecret,
+      projectId: credentials ? credentials.projectId : this.projectId,
+      projectSecret: credentials
+        ? credentials.projectSecret
+        : this.projectSecret,
       serverUrl: this.serverUrl,
     });
     const providers = [imessage.config(providerConfig)];
