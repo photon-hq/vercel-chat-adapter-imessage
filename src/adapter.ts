@@ -724,18 +724,15 @@ export class iMessageAdapter implements Adapter {
         this.logger.debug("Skipping malformed inbound iMessage reaction");
         return;
       }
-      this.chat.processReaction(
-        buildInboundReaction({
-          adapter: this,
+      this.processInboundReaction(
+        {
+          chatGuid: space.id,
           emoji,
           messageId: target.id,
+          phone: space.phone ?? message.space?.phone,
           raw: message,
-          senderId: message.sender?.id ?? "",
-          threadId: encodeThreadId({
-            chatGuid: space.id,
-            phone: space.phone ?? message.space?.phone,
-          }),
-        }),
+          senderId: message.sender?.id,
+        },
         options
       );
       return;
@@ -771,18 +768,15 @@ export class iMessageAdapter implements Adapter {
       return;
     }
     if (contentType === "reaction") {
-      this.chat.processReaction(
-        buildInboundReaction({
-          adapter: this,
+      this.processInboundReaction(
+        {
+          chatGuid: space.id,
           emoji: message.content.emoji,
           messageId: message.content.target.id,
+          phone: (space as { phone?: string }).phone,
           raw: message,
-          senderId: message.sender?.id ?? "",
-          threadId: encodeThreadId({
-            chatGuid: space.id,
-            phone: (space as { phone?: string }).phone,
-          }),
-        }),
+          senderId: message.sender?.id,
+        },
         options
       );
       return;
@@ -793,6 +787,36 @@ export class iMessageAdapter implements Adapter {
 
     const chatMessage = buildChatMessage(message, space);
     this.chat.processMessage(this, chatMessage.threadId, chatMessage, options);
+  }
+
+  private processInboundReaction(
+    reaction: {
+      chatGuid: string;
+      emoji: string;
+      messageId: string;
+      phone?: string;
+      raw: unknown;
+      senderId?: string;
+    },
+    options?: WebhookOptions
+  ): void {
+    if (!this.chat) {
+      return;
+    }
+    this.chat.processReaction(
+      buildInboundReaction({
+        adapter: this,
+        emoji: reaction.emoji,
+        messageId: reaction.messageId,
+        raw: reaction.raw,
+        senderId: reaction.senderId ?? "",
+        threadId: encodeThreadId({
+          chatGuid: reaction.chatGuid,
+          phone: reaction.phone,
+        }),
+      }),
+      options
+    );
   }
 
   private handlePollOption(
