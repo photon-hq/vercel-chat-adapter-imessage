@@ -66,10 +66,7 @@ createiMessageAdapter({
 
 ## Receiving messages
 
-There are two ways to receive inbound messages. Both normalize inline replies by
-surfacing their text or attachments as a regular Chat SDK message. The Spectrum
-reply target remains available on `message.raw.content.target`; Chat SDK 4.32
-does not define a canonical reply field in `MessageMetadata`.
+There are two ways to receive inbound messages:
 
 - **Webhooks** (recommended for serverless) — Spectrum Cloud delivers each message to an HTTPS endpoint as signed JSON. No long-lived connection or cron job. Remote (cloud) mode only.
 - **Gateway listener** — `startGatewayListener()` consumes spectrum-ts's message stream in real time. Works in cloud and self-hosted modes; in serverless it needs a cron job to stay connected.
