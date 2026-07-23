@@ -1,9 +1,9 @@
-import { Message, parseMarkdown } from "chat";
 import type {
   Content as SpectrumContent,
   Message as SpectrumMessage,
   Space as SpectrumSpace,
 } from "@spectrum-ts/core";
+import { Message, parseMarkdown } from "chat";
 import { encodeThreadId, isDMChatGuid } from "./thread";
 
 /**
@@ -31,7 +31,10 @@ export function buildChatMessageFromFields(
 
   return new Message({
     id: fields.id,
-    threadId: encodeThreadId({ chatGuid: fields.chatGuid, phone: fields.phone }),
+    threadId: encodeThreadId({
+      chatGuid: fields.chatGuid,
+      phone: fields.phone,
+    }),
     text,
     formatted: parseMarkdown(text),
     author: {
@@ -79,7 +82,7 @@ function extractText(content: SpectrumContent): string {
     case "poll":
       return content.title;
     case "reply":
-      return extractText(content.content);
+      return content.content ? extractText(content.content) : "";
     case "group":
       return content.items
         .map((item) => extractText(item.content))
@@ -108,7 +111,7 @@ function extractAttachments(content: SpectrumContent): ExtractedAttachment[] {
         mimeType: voice.mimeType,
         size: voice.size,
       });
-    } else if (c.type === "reply") {
+    } else if (c.type === "reply" && c.content) {
       visit(c.content);
     } else if (c.type === "group") {
       for (const item of c.items) {

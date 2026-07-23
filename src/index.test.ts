@@ -698,6 +698,25 @@ describe("handleWebhook", () => {
     ]);
   });
 
+  it("handles a malformed inline reply with no nested content", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    const response = await adapter.handleWebhook(
+      signedWebhookRequest({
+        body: textMessagePayload({
+          content: { type: "reply", target: { id: "original-1" } },
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const message = mockChat.processMessage.mock.calls[0]?.[2];
+    expect(message).toEqual(
+      expect.objectContaining({ text: "", attachments: [] })
+    );
+  });
+
   it("surfaces attachments from a group delivery", async () => {
     const adapter = webhookAdapter();
     await init(adapter);
