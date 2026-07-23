@@ -78,6 +78,8 @@ function extractText(content: SpectrumContent): string {
       return String(content.url);
     case "poll":
       return content.title;
+    case "reply":
+      return extractText(content.content);
     case "group":
       return content.items
         .map((item) => extractText(item.content))
@@ -106,6 +108,8 @@ function extractAttachments(content: SpectrumContent): ExtractedAttachment[] {
         mimeType: voice.mimeType,
         size: voice.size,
       });
+    } else if (c.type === "reply") {
+      visit(c.content);
     } else if (c.type === "group") {
       for (const item of c.items) {
         visit(item.content);
