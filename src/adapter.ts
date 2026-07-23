@@ -93,6 +93,7 @@ export class iMessageAdapter implements Adapter {
   readonly projectId?: string;
   readonly projectSecret?: string;
   readonly clients?: IMessageClientEntry[];
+  readonly credentials?: iMessageAdapterConfig["credentials"];
   readonly phone?: string;
   readonly webhookSecret?: string;
 
@@ -120,6 +121,7 @@ export class iMessageAdapter implements Adapter {
     }
 
     this.logger = config.logger;
+    this.credentials = config.credentials;
     this.serverUrl = config.serverUrl;
     this.apiKey = config.apiKey;
     this.projectId = config.projectId;
@@ -166,12 +168,13 @@ export class iMessageAdapter implements Adapter {
   }
 
   private async buildApp(): Promise<void> {
+    const credentials = await this.credentials?.();
     const { providerConfig, projectId, projectSecret } = resolveSpectrumConfig({
       apiKey: this.apiKey,
       clients: this.clients,
       phone: this.phone,
-      projectId: this.projectId,
-      projectSecret: this.projectSecret,
+      projectId: credentials?.projectId ?? this.projectId,
+      projectSecret: credentials?.projectSecret ?? this.projectSecret,
       serverUrl: this.serverUrl,
     });
     const providers = [imessage.config(providerConfig)];

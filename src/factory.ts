@@ -77,7 +77,7 @@ export function createiMessageAdapter(
   const hasClients = Array.isArray(clients)
     ? clients.length > 0
     : Boolean(clients);
-  const hasCloud = Boolean(projectId && projectSecret);
+  const hasCloud = Boolean(config?.credentials || (projectId && projectSecret));
   const hasServerUrl = Boolean(serverUrl);
   const hasApiKey = Boolean(apiKey);
 
@@ -85,6 +85,7 @@ export function createiMessageAdapter(
 
   return new iMessageAdapter({
     logger,
+    credentials: config?.credentials,
     projectId,
     projectSecret,
     clients,
