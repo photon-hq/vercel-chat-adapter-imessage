@@ -172,15 +172,26 @@ export class iMessageAdapter implements Adapter {
   }
 
   private async buildApp(): Promise<void> {
-    const credentials = await this.credentialProvider?.();
-    const { providerConfig, projectId, projectSecret } = resolveSpectrumConfig({
+    let projectId = this.projectId;
+    let projectSecret = this.projectSecret;
+
+    if (this.credentialProvider) {
+      const credentials = await this.credentialProvider();
+      if (!(credentials?.projectId && credentials.projectSecret)) {
+        throw new ValidationError(
+          "imessage",
+          "The credential provider must return both projectId and projectSecret."
+        );
+      }
+      ({ projectId, projectSecret } = credentials);
+    }
+
+    const { providerConfig } = resolveSpectrumConfig({
       apiKey: this.apiKey,
       clients: this.clients,
       phone: this.phone,
-      projectId: credentials ? credentials.projectId : this.projectId,
-      projectSecret: credentials
-        ? credentials.projectSecret
-        : this.projectSecret,
+      projectId,
+      projectSecret,
       serverUrl: this.serverUrl,
     });
     const providers = [imessage.config(providerConfig)];

@@ -2302,20 +2302,28 @@ describe("createiMessageAdapter", () => {
     );
   });
 
-  it("does not combine partial provider credentials with static credentials", async () => {
-    const credentials = vi.fn(async () => ({
-      projectId: undefined,
-      projectSecret: "lazy-secret",
-    }));
-    const adapter = createiMessageAdapter({
-      credentials: credentials as never,
-      projectId: "static-project",
-      projectSecret: "static-secret",
-    });
+  it.each([
+    ["partial", { projectId: undefined, projectSecret: "lazy-secret" }],
+    ["undefined", undefined],
+    ["null", null],
+  ])(
+    "rejects a %s provider result instead of falling back to other auth",
+    async (_, providerResult) => {
+      const credentials = vi.fn(async () => providerResult);
+      const adapter = createiMessageAdapter({
+        credentials: credentials as never,
+        projectId: "static-project",
+        projectSecret: "static-secret",
+        serverUrl: "grpc.example.com:443",
+        apiKey: "self-host-token",
+      });
 
-    await expect(init(adapter)).rejects.toThrow(ValidationError);
-    expect(mockSpectrum).not.toHaveBeenCalled();
-  });
+      await expect(init(adapter)).rejects.toThrow(
+        "The credential provider must return both projectId and projectSecret."
+      );
+      expect(mockSpectrum).not.toHaveBeenCalled();
+    }
+  );
 
   it("shares one lazy credential lookup across concurrent initialization", async () => {
     const credentials = vi.fn(async () => ({
