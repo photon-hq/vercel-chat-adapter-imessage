@@ -271,7 +271,7 @@ bot.onModalSubmit("fav-color", async (event) => {
 
 ## Tapback reactions
 
-iMessage uses tapbacks instead of emoji reactions. The adapter maps standard emoji names to iMessage tapbacks:
+iMessage uses tapbacks instead of emoji reactions. Outbound reactions map standard emoji names to iMessage tapbacks:
 
 | Emoji name | Tapback |
 |------------|---------|

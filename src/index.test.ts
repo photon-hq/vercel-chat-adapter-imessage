@@ -167,6 +167,7 @@ let iteratorReturnSpy: ReturnType<typeof vi.fn>;
 let mockChat: {
   processMessage: ReturnType<typeof vi.fn>;
   processModalSubmit: ReturnType<typeof vi.fn>;
+  processReaction: ReturnType<typeof vi.fn>;
 };
 
 function createMockApp() {
@@ -423,7 +424,11 @@ beforeEach(() => {
   mockApp = harness.app;
   pushInbound = harness.push;
   iteratorReturnSpy = harness.returnSpy;
-  mockChat = { processMessage: vi.fn(), processModalSubmit: vi.fn() };
+  mockChat = {
+    processMessage: vi.fn(),
+    processModalSubmit: vi.fn(),
+    processReaction: vi.fn(),
+  };
 
   mockSpectrum.mockReset();
   mockSpectrum.mockResolvedValue(mockApp);
@@ -839,20 +844,98 @@ describe("handleWebhook", () => {
     expect(mockChat.processMessage).not.toHaveBeenCalled();
   });
 
-  it("ignores inbound reactions", async () => {
+  it.each([
+    ["❤️", "heart"],
+    ["👍", "thumbs_up"],
+    ["👎", "thumbs_down"],
+    ["😂", "laugh"],
+    ["‼️", "exclamation"],
+    ["❓", "question"],
+  ])("maps inbound tapback %s to %s", async (rawEmoji, name) => {
     const adapter = webhookAdapter();
     await init(adapter);
 
     const response = await adapter.handleWebhook(
       signedWebhookRequest({
         body: textMessagePayload({
-          content: { type: "reaction", emoji: "❤️", target: { id: "m1" } },
+          content: { type: "reaction", emoji: rawEmoji, target: { id: "m1" } },
         }),
       })
     );
 
     expect(response.status).toBe(200);
+    expect(mockChat.processReaction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        adapter,
+        added: true,
+        messageId: "m1",
+        rawEmoji,
+        threadId: "imessage:iMessage;-;+1234567890",
+        user: expect.objectContaining({ userId: "+1234567890", isMe: false }),
+        emoji: expect.objectContaining({ name }),
+      }),
+      undefined
+    );
     expect(mockChat.processMessage).not.toHaveBeenCalled();
+  });
+
+  it("uses the surfaced parent ID for multipart reaction targets", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    await adapter.handleWebhook(
+      signedWebhookRequest({
+        body: textMessagePayload({
+          content: {
+            type: "reaction",
+            emoji: "❤️",
+            target: { id: "p:5/msg-guid", parentId: "msg-guid" },
+          },
+        }),
+      })
+    );
+
+    expect(mockChat.processReaction).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: "msg-guid" }),
+      undefined
+    );
+  });
+
+  it("passes through non-standard reaction strings", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    await adapter.handleWebhook(
+      signedWebhookRequest({
+        body: textMessagePayload({
+          content: { type: "reaction", emoji: "🔥", target: { id: "m1" } },
+        }),
+      })
+    );
+
+    expect(mockChat.processReaction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        emoji: expect.objectContaining({ name: "🔥" }),
+        rawEmoji: "🔥",
+      }),
+      undefined
+    );
+  });
+
+  it("ignores outbound/self reactions", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    await adapter.handleWebhook(
+      signedWebhookRequest({
+        body: textMessagePayload({
+          direction: "outbound",
+          content: { type: "reaction", emoji: "❤️", target: { id: "m1" } },
+        }),
+      })
+    );
+
+    expect(mockChat.processReaction).not.toHaveBeenCalled();
   });
 
   it("ignores group-event deliveries (rename, membership, avatar)", async () => {
@@ -938,6 +1021,57 @@ describe("startGatewayListener", () => {
       expect.objectContaining({ text: "hi" }),
       expect.anything()
     );
+  });
+
+  it("routes inbound reactions identically to webhooks", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const space = makeSpace("iMessage;-;+1234567890");
+    await startTrackedListener(adapter);
+
+    pushInbound([
+      space,
+      makeMessage("reaction-1", space, {
+        type: "reaction",
+        emoji: "👍",
+        target: { id: "p:5/target-1", parentId: "target-1" },
+      }),
+    ]);
+
+    await vi.waitFor(() => expect(mockChat.processReaction).toHaveBeenCalled());
+    expect(mockChat.processReaction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        adapter,
+        added: true,
+        messageId: "target-1",
+        rawEmoji: "👍",
+        threadId: "imessage:iMessage;-;+1234567890",
+        user: expect.objectContaining({ userId: "+1234567890", isMe: false }),
+        emoji: expect.objectContaining({ name: "thumbs_up" }),
+      }),
+      expect.anything()
+    );
+    expect(mockChat.processMessage).not.toHaveBeenCalled();
+  });
+
+  it("ignores outbound/self reactions", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const space = makeSpace("iMessage;-;+1234567890");
+    await startTrackedListener(adapter);
+
+    pushInbound([
+      space,
+      makeMessage(
+        "reaction-1",
+        space,
+        { type: "reaction", emoji: "👍", target: { id: "target-1" } },
+        { direction: "outbound" }
+      ),
+    ]);
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(mockChat.processReaction).not.toHaveBeenCalled();
   });
 
   it("closes the message stream on abort", async () => {
@@ -1875,7 +2009,9 @@ describe("addReaction / removeReaction", () => {
     });
     await expect(
       adapter.addReaction("imessage:iMessage;-;+1234567890", "msg-001", "fire")
-    ).rejects.toThrow('Unsupported iMessage tapback: "fire"');
+    ).rejects.toThrow(
+      'Supported: heart, love, thumbs_up, like, thumbs_down, dislike, laugh, exclamation, emphasize, question'
+    );
   });
 
   it("removes a reaction added earlier this session by unsending it", async () => {
@@ -2242,6 +2378,45 @@ describe("poll vote -> processModalSubmit", () => {
         values: { answer: "c" },
         user: expect.objectContaining({ userId: "+1555555555" }),
       }),
+      "ctx-123",
+      expect.anything()
+    );
+  });
+
+  it("continues to process outbound poll votes", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const { space } = await primeInbound(adapter, {
+      chatGuid: "iMessage;-;+1234567890",
+      sendResult: { id: "poll-outbound-001" },
+    });
+
+    await adapter.openModal(
+      "imessage:iMessage;-;+1234567890",
+      surveyModal,
+      "ctx-123"
+    );
+
+    pushInbound([
+      space,
+      makeMessage(
+        "vote-outbound",
+        space,
+        {
+          type: "poll_option",
+          selected: true,
+          poll: { title: "Survey", options: [] },
+          option: { title: "Option A" },
+        },
+        { direction: "outbound" }
+      ),
+    ]);
+
+    await vi.waitFor(() =>
+      expect(mockChat.processModalSubmit).toHaveBeenCalled()
+    );
+    expect(mockChat.processModalSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({ values: { answer: "a" } }),
       "ctx-123",
       expect.anything()
     );

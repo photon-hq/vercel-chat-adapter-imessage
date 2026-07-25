@@ -1,4 +1,21 @@
 import { extractFiles, ValidationError } from "@chat-adapter/shared";
+import {
+  type AppUrl,
+  app as appContent,
+  type ContentBuilder,
+  markdown as markdownContent,
+  poll as pollContent,
+  Spectrum,
+  type SpectrumInstance,
+  type Message as SpectrumMessage,
+  type Space as SpectrumSpace,
+  text as textContent,
+} from "@spectrum-ts/core";
+import {
+  customizedMiniApp,
+  effect as effectContent,
+  imessage,
+} from "@spectrum-ts/imessage";
 import type {
   Adapter,
   AdapterPostableMessage,
@@ -17,23 +34,6 @@ import type {
 } from "chat";
 import { NotImplementedError } from "chat";
 import {
-  type AppUrl,
-  app as appContent,
-  type ContentBuilder,
-  markdown as markdownContent,
-  poll as pollContent,
-  Spectrum,
-  type SpectrumInstance,
-  type Message as SpectrumMessage,
-  type Space as SpectrumSpace,
-  text as textContent,
-} from "@spectrum-ts/core";
-import {
-  customizedMiniApp,
-  effect as effectContent,
-  imessage,
-} from "@spectrum-ts/imessage";
-import {
   type BackgroundInput,
   type BackgroundOptions,
   resolveBackground,
@@ -48,7 +48,12 @@ import { InboundCache } from "./internal/cache";
 import { MessagePump } from "./internal/gateway";
 import { buildChatMessage } from "./internal/inbound";
 import { ModalPollRegistry } from "./internal/modals";
-import { emojiToGlyph, fileToAttachment } from "./internal/outbound";
+import { fileToAttachment } from "./internal/outbound";
+import {
+  buildInboundReaction,
+  emojiToTapback,
+  getReactionTargetId,
+} from "./internal/tapbacks";
 import {
   decodeThreadId,
   encodeThreadId,
@@ -503,7 +508,7 @@ export class iMessageAdapter implements Adapter {
     messageId: string,
     emoji: EmojiValue | string
   ): Promise<void> {
-    const glyph = emojiToGlyph(emoji);
+    const glyph = emojiToTapback(emoji);
     const target = await this.resolveMessage(threadId, messageId);
     if (!target) {
       throw new NotImplementedError(
@@ -525,7 +530,7 @@ export class iMessageAdapter implements Adapter {
   ): Promise<void> {
     // spectrum-ts message ids are globally unique, so the target message id
     // alone keys the reaction handle — the thread id isn't needed here.
-    const glyph = emojiToGlyph(emoji);
+    const glyph = emojiToTapback(emoji);
     const reaction = this.cache.takeReaction(messageId, glyph);
     if (!reaction) {
       throw new NotImplementedError(
@@ -711,15 +716,36 @@ export class iMessageAdapter implements Adapter {
     // No live Space to cache — remember the sending line so a later rebuild
     // picks the right one when several are configured.
     this.cache.rememberPhone(space.id, space.phone ?? message.space?.phone);
-    // Parity with the gateway path: surface only inbound text/attachment
-    // messages — skip the bot's own echoes and inbound reactions.
     if (message.direction === "outbound") {
       return;
     }
     if (message.content?.type === "reaction") {
+      const { emoji, target } = message.content as {
+        emoji?: unknown;
+        target?: { id?: unknown; parentId?: unknown };
+      };
+      const messageId = target && getReactionTargetId(target);
+      if (typeof emoji !== "string" || !messageId) {
+        this.logger.debug("Skipping malformed inbound iMessage reaction");
+        return;
+      }
+      this.processInboundReaction(
+        {
+          chatGuid: space.id,
+          emoji,
+          messageId,
+          phone: space.phone ?? message.space?.phone,
+          raw: message,
+          senderId: message.sender?.id,
+        },
+        options
+      );
       return;
     }
-    if (message.content?.type && EVENT_CONTENT_TYPES.has(message.content.type)) {
+    if (
+      message.content?.type &&
+      EVENT_CONTENT_TYPES.has(message.content.type)
+    ) {
       return;
     }
 
@@ -743,20 +769,61 @@ export class iMessageAdapter implements Adapter {
       this.handlePollOption(space, message, options);
       return;
     }
+    if (message.direction === "outbound") {
+      return;
+    }
     if (contentType === "reaction") {
-      // Inbound reactions are not surfaced to Chat SDK (parity with the
-      // previous adapter, which only forwarded text/attachment messages).
+      this.processInboundReaction(
+        {
+          chatGuid: space.id,
+          emoji: message.content.emoji,
+          messageId:
+            getReactionTargetId(message.content.target) ??
+            message.content.target.id,
+          phone: (space as { phone?: string }).phone,
+          raw: message,
+          senderId: message.sender?.id,
+        },
+        options
+      );
       return;
     }
     if (EVENT_CONTENT_TYPES.has(contentType)) {
       return;
     }
-    if (message.direction === "outbound") {
-      return;
-    }
 
     const chatMessage = buildChatMessage(message, space);
     this.chat.processMessage(this, chatMessage.threadId, chatMessage, options);
+  }
+
+  private processInboundReaction(
+    reaction: {
+      chatGuid: string;
+      emoji: string;
+      messageId: string;
+      phone?: string;
+      raw: unknown;
+      senderId?: string;
+    },
+    options?: WebhookOptions
+  ): void {
+    if (!this.chat) {
+      return;
+    }
+    this.chat.processReaction(
+      buildInboundReaction({
+        adapter: this,
+        emoji: reaction.emoji,
+        messageId: reaction.messageId,
+        raw: reaction.raw,
+        senderId: reaction.senderId ?? "",
+        threadId: encodeThreadId({
+          chatGuid: reaction.chatGuid,
+          phone: reaction.phone,
+        }),
+      }),
+      options
+    );
   }
 
   private handlePollOption(
@@ -856,10 +923,7 @@ export class iMessageAdapter implements Adapter {
    * types as `never` — cast to the slice of the instance we use.
    */
   private platformSpaces(): {
-    get(
-      id: string,
-      params?: { phone: string }
-    ): Promise<SpectrumSpace>;
+    get(id: string, params?: { phone: string }): Promise<SpectrumSpace>;
     create(users: string): Promise<SpectrumSpace>;
   } {
     if (!this.app) {
@@ -868,10 +932,7 @@ export class iMessageAdapter implements Adapter {
     return (
       imessage(this.app) as unknown as {
         space: {
-          get(
-            id: string,
-            params?: { phone: string }
-          ): Promise<SpectrumSpace>;
+          get(id: string, params?: { phone: string }): Promise<SpectrumSpace>;
           create(users: string): Promise<SpectrumSpace>;
         };
       }
