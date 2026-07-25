@@ -640,6 +640,83 @@ describe("handleWebhook", () => {
     );
   });
 
+  it("unwraps inline reply text", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    await adapter.handleWebhook(
+      signedWebhookRequest({
+        body: textMessagePayload({
+          content: {
+            type: "reply",
+            target: { id: "original-1" },
+            content: { type: "text", text: "inline answer" },
+          },
+        }),
+      })
+    );
+
+    expect(mockChat.processMessage).toHaveBeenCalledWith(
+      adapter,
+      expect.any(String),
+      expect.objectContaining({
+        text: "inline answer",
+        raw: expect.objectContaining({
+          content: expect.objectContaining({
+            target: expect.objectContaining({ id: "original-1" }),
+          }),
+        }),
+      }),
+      undefined
+    );
+  });
+
+  it("unwraps attachments from inline replies", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    await adapter.handleWebhook(
+      signedWebhookRequest({
+        body: textMessagePayload({
+          content: {
+            type: "reply",
+            target: { id: "original-1" },
+            content: {
+              type: "attachment",
+              name: "reply.png",
+              mimeType: "image/png",
+              size: 123,
+            },
+          },
+        }),
+      })
+    );
+
+    const message = mockChat.processMessage.mock.calls[0]?.[2];
+    expect(message.attachments).toEqual([
+      expect.objectContaining({ name: "reply.png", type: "image" }),
+    ]);
+  });
+
+  it("handles a malformed inline reply with no nested content", async () => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+
+    const response = await adapter.handleWebhook(
+      signedWebhookRequest({
+        body: textMessagePayload({
+          content: { type: "reply", target: { id: "original-1" } },
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const message = mockChat.processMessage.mock.calls[0]?.[2];
+    expect(message).toEqual(
+      expect.objectContaining({ text: "", attachments: [] })
+    );
+  });
+
   it("surfaces attachments from a group delivery", async () => {
     const adapter = webhookAdapter();
     await init(adapter);
