@@ -8,6 +8,9 @@ permissions:
   contents: write
   pull-requests: read
   id-token: write
+  # Required by buildspace typescript-service-release's github-packages-publish
+  # job (permission is validated at workflow start even when the job is skipped).
+  packages: write
 
 jobs:
   release:
