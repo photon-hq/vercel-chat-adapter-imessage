@@ -38,6 +38,23 @@ bot.onNewMention(async (thread, message) => {
 });
 ```
 
+Credentials can also be resolved lazily when the adapter is first used, which
+is useful when retrieving them from a credential broker:
+
+```typescript
+createiMessageAdapter({
+  credentials: async () => {
+    const value = await getToken("photon/my-agent", {
+      subject: { type: "app" },
+    });
+
+    return parsePhotonCredential(value);
+  },
+});
+```
+
+The provider must return `{ projectId, projectSecret }`.
+
 ## Setup
 
 ### Cloud mode
@@ -172,6 +189,7 @@ This runs every 9 minutes, ensuring overlap with the 10-minute listener duration
 |--------|----------|-------------|
 | `projectId` | Cloud | Spectrum Cloud project ID. Auto-detected from `IMESSAGE_PROJECT_ID` |
 | `projectSecret` | Cloud | Spectrum Cloud project secret. Auto-detected from `IMESSAGE_PROJECT_SECRET` |
+| `credentials` | Cloud | Sync or async provider for lazy `{ projectId, projectSecret }` resolution |
 | `serverUrl` | Self-host | gRPC `host:port` of your iMessage server. Auto-detected from `IMESSAGE_SERVER_URL` |
 | `apiKey` | Self-host | Auth token for the self-hosted server. Auto-detected from `IMESSAGE_API_KEY` |
 | `clients` | No | Explicit `{ address, token, phone }[]` for multi-number self-host setups |

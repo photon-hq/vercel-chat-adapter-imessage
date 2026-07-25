@@ -9,11 +9,22 @@ export interface IMessageProviderConfig {
   clients?: IMessageClientEntry[];
 }
 
+export interface SpectrumCloudCredentials {
+  projectId: string;
+  projectSecret: string;
+}
+
+export type iMessageCredentialProvider = () =>
+  | Promise<SpectrumCloudCredentials>
+  | SpectrumCloudCredentials;
+
 export interface iMessageAdapterConfig {
   /** Legacy self-host token. Mapped to a `clients` entry's `token`. */
   apiKey?: string;
   /** Explicit self-host gRPC clients (advanced). */
   clients?: IMessageClientEntry | IMessageClientEntry[];
+  /** Resolve Spectrum Cloud credentials when the adapter is first used. */
+  credentials?: iMessageCredentialProvider;
   /**
    * @deprecated Local (on-device) mode was removed. `false` is accepted as a
    * no-op for back-compat; `true` throws.
@@ -38,6 +49,11 @@ export type iMessageAdapterRemoteConfig = iMessageAdapterConfig;
 export interface CreateiMessageAdapterOptions {
   apiKey?: string;
   clients?: IMessageClientEntry | IMessageClientEntry[];
+  /**
+   * Resolve Spectrum Cloud credentials lazily. The provider is called when the
+   * adapter first initializes or sends, rather than during construction.
+   */
+  credentials?: iMessageCredentialProvider;
   /**
    * @deprecated Local (on-device) mode was removed. `false` is accepted as a
    * no-op for back-compat; `true` throws.

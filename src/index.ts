@@ -10,6 +10,8 @@ export {
   deriveAddress,
   type iMessageAdapterConfig,
   type iMessageAdapterRemoteConfig,
+  type iMessageCredentialProvider,
+  type SpectrumCloudCredentials,
 } from "./config";
 export {
   type IMessageMessageEffect,

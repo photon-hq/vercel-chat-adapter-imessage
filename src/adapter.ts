@@ -38,7 +38,11 @@ import {
   type BackgroundOptions,
   resolveBackground,
 } from "./background";
-import { type iMessageAdapterConfig, resolveSpectrumConfig } from "./config";
+import {
+  type iMessageAdapterConfig,
+  type iMessageCredentialProvider,
+  resolveSpectrumConfig,
+} from "./config";
 import {
   type IMessageMessageEffect,
   type iMessageEffectName,
@@ -107,6 +111,7 @@ export class iMessageAdapter implements Adapter {
   private appBuild: Promise<void> | null = null;
 
   private chat: ChatInstance | null = null;
+  private readonly credentialProvider?: iMessageCredentialProvider;
   private readonly logger: Logger;
   private readonly formatConverter = new iMessageFormatConverter();
   private readonly cache = new InboundCache();
@@ -125,6 +130,7 @@ export class iMessageAdapter implements Adapter {
     }
 
     this.logger = config.logger;
+    this.credentialProvider = config.credentials;
     this.serverUrl = config.serverUrl;
     this.apiKey = config.apiKey;
     this.projectId = config.projectId;
@@ -171,12 +177,26 @@ export class iMessageAdapter implements Adapter {
   }
 
   private async buildApp(): Promise<void> {
-    const { providerConfig, projectId, projectSecret } = resolveSpectrumConfig({
+    let projectId = this.projectId;
+    let projectSecret = this.projectSecret;
+
+    if (this.credentialProvider) {
+      const credentials = await this.credentialProvider();
+      if (!(credentials?.projectId && credentials.projectSecret)) {
+        throw new ValidationError(
+          "imessage",
+          "The credential provider must return both projectId and projectSecret."
+        );
+      }
+      ({ projectId, projectSecret } = credentials);
+    }
+
+    const { providerConfig } = resolveSpectrumConfig({
       apiKey: this.apiKey,
       clients: this.clients,
       phone: this.phone,
-      projectId: this.projectId,
-      projectSecret: this.projectSecret,
+      projectId,
+      projectSecret,
       serverUrl: this.serverUrl,
     });
     const providers = [imessage.config(providerConfig)];

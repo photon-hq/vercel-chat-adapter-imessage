@@ -2531,6 +2531,67 @@ describe("createiMessageAdapter", () => {
     expect(adapter.projectId).toBe("p");
   });
 
+  it("atomically prefers lazy cloud credentials on initialization", async () => {
+    const credentials = vi.fn(async () => ({
+      projectId: "lazy-project",
+      projectSecret: "lazy-secret",
+    }));
+    const adapter = createiMessageAdapter({
+      credentials,
+      projectId: "static-project",
+      projectSecret: "static-secret",
+    });
+
+    expect(credentials).not.toHaveBeenCalled();
+    await init(adapter);
+
+    expect(credentials).toHaveBeenCalledOnce();
+    expect(mockSpectrum).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "lazy-project",
+        projectSecret: "lazy-secret",
+      })
+    );
+  });
+
+  it.each([
+    ["partial", { projectId: undefined, projectSecret: "lazy-secret" }],
+    ["undefined", undefined],
+    ["null", null],
+  ])(
+    "rejects a %s provider result instead of falling back to other auth",
+    async (_, providerResult) => {
+      const credentials = vi.fn(async () => providerResult);
+      const adapter = createiMessageAdapter({
+        credentials: credentials as never,
+        projectId: "static-project",
+        projectSecret: "static-secret",
+        serverUrl: "grpc.example.com:443",
+        apiKey: "self-host-token",
+      });
+
+      await expect(init(adapter)).rejects.toThrow(
+        "The credential provider must return both projectId and projectSecret."
+      );
+      expect(mockSpectrum).not.toHaveBeenCalled();
+    }
+  );
+
+  it("shares one lazy credential lookup across concurrent initialization", async () => {
+    const credentials = vi.fn(async () => ({
+      projectId: "lazy-project",
+      projectSecret: "lazy-secret",
+    }));
+    const adapter = createiMessageAdapter({ credentials });
+
+    await Promise.all([
+      adapter.initialize(mockChat as never),
+      adapter.initialize(mockChat as never),
+    ]);
+
+    expect(credentials).toHaveBeenCalledOnce();
+  });
+
   it("uses cloud credentials when provided", () => {
     const adapter = createiMessageAdapter({
       local: false,
