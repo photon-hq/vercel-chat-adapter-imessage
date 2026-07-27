@@ -41,6 +41,7 @@ import {
 import {
   type iMessageAdapterConfig,
   type iMessageCredentialProvider,
+  type iMessageWebhookVerifier,
   resolveSpectrumConfig,
 } from "./config";
 import {
@@ -104,6 +105,7 @@ export class iMessageAdapter implements Adapter {
   readonly clients?: IMessageClientEntry[];
   readonly phone?: string;
   readonly webhookSecret?: string;
+  readonly webhookVerifier?: iMessageWebhookVerifier;
 
   /** The spectrum-ts instance — null until `initialize()` or `ensureApp()` runs. */
   app: SpectrumInstance | null = null;
@@ -141,6 +143,7 @@ export class iMessageAdapter implements Adapter {
     // (createiMessageAdapter trims it): a stray space would otherwise fail
     // signature verification only on the constructor path.
     this.webhookSecret = config.webhookSecret?.trim();
+    this.webhookVerifier = config.webhookVerifier;
   }
 
   async initialize(chat: ChatInstance): Promise<void> {
@@ -228,26 +231,41 @@ export class iMessageAdapter implements Adapter {
     if (!this.chat) {
       return new Response("Chat instance not initialized", { status: 500 });
     }
-    if (!this.webhookSecret) {
+    if (!(this.webhookVerifier || this.webhookSecret)) {
       return new Response(
-        "Webhook signing secret not configured (set IMESSAGE_WEBHOOK_SECRET)",
+        "Webhook verification not configured (set IMESSAGE_WEBHOOK_SECRET or supply webhookVerifier)",
         { status: 500 }
       );
     }
 
-    // Read the raw body BEFORE parsing: the signature covers the exact bytes.
+    // Read the raw body BEFORE parsing: native signatures cover exact bytes,
+    // and trusted-forwarder verifiers may need the same unmodified body.
     const rawBody = await request.text();
-    const verdict = verifySpectrumSignature({
-      secret: this.webhookSecret,
-      signature: request.headers.get(SPECTRUM_SIGNATURE_HEADER),
-      timestamp: request.headers.get(SPECTRUM_TIMESTAMP_HEADER),
-      rawBody,
-    });
-    if (!verdict.ok) {
-      this.logger.warn("Rejected iMessage webhook delivery", {
-        reason: verdict.reason,
+    if (this.webhookVerifier) {
+      try {
+        const verified = await this.webhookVerifier(request, rawBody);
+        if (!verified) {
+          return new Response("Webhook verification failed", { status: 401 });
+        }
+      } catch (error) {
+        this.logger.warn("Rejected forwarded iMessage webhook delivery", {
+          error,
+        });
+        return new Response("Webhook verification failed", { status: 401 });
+      }
+    } else if (this.webhookSecret) {
+      const verdict = verifySpectrumSignature({
+        secret: this.webhookSecret,
+        signature: request.headers.get(SPECTRUM_SIGNATURE_HEADER),
+        timestamp: request.headers.get(SPECTRUM_TIMESTAMP_HEADER),
+        rawBody,
       });
-      return new Response(verdict.reason, { status: verdict.status });
+      if (!verdict.ok) {
+        this.logger.warn("Rejected iMessage webhook delivery", {
+          reason: verdict.reason,
+        });
+        return new Response(verdict.reason, { status: verdict.status });
+      }
     }
 
     const event = request.headers.get(SPECTRUM_EVENT_HEADER);

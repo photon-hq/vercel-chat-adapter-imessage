@@ -11,6 +11,7 @@ export {
   type iMessageAdapterConfig,
   type iMessageAdapterRemoteConfig,
   type iMessageCredentialProvider,
+  type iMessageWebhookVerifier,
   type SpectrumCloudCredentials,
 } from "./config";
 export {
