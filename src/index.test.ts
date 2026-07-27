@@ -793,8 +793,34 @@ describe("handleWebhook", () => {
     expect(webhookVerifier).toHaveBeenCalledOnce();
   });
 
-  it("rejects a forwarded webhook when its verifier returns false", async () => {
-    const adapter = cloudAdapter({ webhookVerifier: async () => false });
+  it("uses a replacement body returned by a trusted verifier", async () => {
+    const replacement = textMessagePayload({ text: "verified replacement" });
+    const adapter = cloudAdapter({
+      webhookVerifier: async () => JSON.stringify(replacement),
+    });
+    await init(adapter);
+
+    const response = await adapter.handleWebhook(
+      signedWebhookRequest({ body: textMessagePayload() })
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockChat.processMessage).toHaveBeenCalledWith(
+      adapter,
+      "imessage:iMessage;-;+1234567890",
+      expect.objectContaining({ text: "verified replacement" }),
+      undefined
+    );
+  });
+
+  it.each([
+    false,
+    null,
+    undefined,
+    "",
+    0,
+  ])("rejects a forwarded webhook when its verifier returns %s", async (result) => {
+    const adapter = cloudAdapter({ webhookVerifier: async () => result });
     await init(adapter);
 
     const response = await adapter.handleWebhook(

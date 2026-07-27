@@ -20,12 +20,14 @@ export type iMessageCredentialProvider = () =>
 
 /**
  * Verifies an inbound webhook that was authenticated by a trusted forwarding
- * service. Throwing or returning a falsy value rejects the request.
+ * service. Throwing or returning a falsy value rejects the request. A returned
+ * string replaces the body used for parsing; any other truthy value accepts the
+ * original body.
  */
 export type iMessageWebhookVerifier = (
   request: Request,
   rawBody: string
-) => boolean | Promise<boolean>;
+) => unknown | Promise<unknown>;
 
 export interface iMessageAdapterConfig {
   /** Legacy self-host token. Mapped to a `clients` entry's `token`. */

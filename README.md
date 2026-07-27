@@ -118,7 +118,7 @@ export async function POST(request: Request): Promise<Response> {
 }
 ```
 
-`bot.webhooks.imessage` calls the adapter's `handleWebhook`: it verifies the signature, parses the `messages` event, and routes the message into your bot. When a trusted gateway verifies Photon before forwarding, pass `webhookVerifier`; it receives the request and exact raw body, takes precedence over `webhookSecret`, and must return `true`. Processing runs in the background via `waitUntil`, so the endpoint acknowledges immediately. Spectrum Cloud retries failed deliveries with backoff and delivers at-least-once — dedupe on `X-Spectrum-Webhook-Id` + `message.id` if you need exactly-once side effects.
+`bot.webhooks.imessage` calls the adapter's `handleWebhook`: it verifies the signature, parses the `messages` event, and routes the message into your bot. When a trusted gateway verifies Photon before forwarding, pass `webhookVerifier`; it receives the request and exact raw body and takes precedence over `webhookSecret`. Return a falsy value or throw to reject, a string to parse that verified replacement body, or any other truthy value to accept the original body. Processing runs in the background via `waitUntil`, so the endpoint acknowledges immediately. Spectrum Cloud retries failed deliveries with backoff and delivers at-least-once — dedupe on `X-Spectrum-Webhook-Id` + `message.id` if you need exactly-once side effects.
 
 ### Replying
 
@@ -195,7 +195,7 @@ This runs every 9 minutes, ensuring overlap with the 10-minute listener duration
 | `clients` | No | Explicit `{ address, token, phone }[]` for multi-number self-host setups |
 | `phone` | No | Routing/identity phone for legacy self-host (defaults to `"shared"`). Auto-detected from `IMESSAGE_PHONE` |
 | `webhookSecret` | No | Per-webhook signing secret for verifying Spectrum Cloud deliveries. Required to receive [webhooks](#webhooks) unless `webhookVerifier` is supplied. Auto-detected from `IMESSAGE_WEBHOOK_SECRET` |
-| `webhookVerifier` | No | Sync or async trusted-forwarder verifier `(request, rawBody) => boolean`. Takes precedence over `webhookSecret`; throw or return `false` to reject. |
+| `webhookVerifier` | No | Sync or async trusted-forwarder verifier `(request, rawBody)`. Takes precedence over `webhookSecret`; throw or return a falsy value to reject, return a string to replace the parsed body, or another truthy value to accept the original body. |
 | `logger` | No | Logger instance (defaults to `ConsoleLogger("info")`) |
 
 ## Environment variables

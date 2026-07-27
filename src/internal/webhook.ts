@@ -45,9 +45,13 @@ export interface SpectrumWebhookPayload {
   space: SpectrumWebhookSpace;
 }
 
-export type WebhookVerification =
+export type SignatureVerification =
   | { ok: true }
   | { ok: false; reason: string; status: number };
+
+export type WebhookVerification =
+  | { ok: true; body: string }
+  | { ok: false; reason: string; status: number; cause?: unknown };
 
 export type WebhookRequestVerifier = (
   request: Request,
@@ -66,14 +70,24 @@ export function createWebhookVerifier(options: {
   if (customVerifier) {
     return async (request, rawBody) => {
       try {
-        return (await customVerifier(request, rawBody))
-          ? { ok: true }
-          : { ok: false, reason: "webhook verification failed", status: 401 };
-      } catch {
+        const result = await customVerifier(request, rawBody);
+        if (!result) {
+          return {
+            ok: false,
+            reason: "webhook verification failed",
+            status: 401,
+          };
+        }
+        return {
+          ok: true,
+          body: typeof result === "string" ? result : rawBody,
+        };
+      } catch (cause) {
         return {
           ok: false,
           reason: "webhook verification failed",
           status: 401,
+          cause,
         };
       }
     };
@@ -84,13 +98,15 @@ export function createWebhookVerifier(options: {
     return;
   }
 
-  return async (request, rawBody) =>
-    verifySpectrumSignature({
+  return async (request, rawBody) => {
+    const verification = verifySpectrumSignature({
       secret,
       signature: request.headers.get(SPECTRUM_SIGNATURE_HEADER),
       timestamp: request.headers.get(SPECTRUM_TIMESTAMP_HEADER),
       rawBody,
     });
+    return verification.ok ? { ok: true, body: rawBody } : verification;
+  };
 }
 
 /**
@@ -106,7 +122,7 @@ export function verifySpectrumSignature(opts: {
   secret: string;
   signature: string | null;
   timestamp: string | null;
-}): WebhookVerification {
+}): SignatureVerification {
   const { rawBody, secret, signature, timestamp } = opts;
   if (!(signature && timestamp)) {
     return { ok: false, status: 400, reason: "missing signature headers" };

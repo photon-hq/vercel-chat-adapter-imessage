@@ -245,9 +245,13 @@ export class iMessageAdapter implements Adapter {
     if (!verification.ok) {
       this.logger.warn("Rejected iMessage webhook delivery", {
         reason: verification.reason,
+        ...(verification.cause === undefined
+          ? {}
+          : { error: verification.cause }),
       });
       return new Response(verification.reason, { status: verification.status });
     }
+    const verifiedBody = verification.body;
 
     const event = request.headers.get(SPECTRUM_EVENT_HEADER);
     if (event && event !== SPECTRUM_MESSAGES_EVENT) {
@@ -257,7 +261,7 @@ export class iMessageAdapter implements Adapter {
 
     let payload: SpectrumWebhookPayload;
     try {
-      payload = JSON.parse(rawBody) as SpectrumWebhookPayload;
+      payload = JSON.parse(verifiedBody) as SpectrumWebhookPayload;
     } catch {
       return new Response("Invalid JSON body", { status: 400 });
     }
