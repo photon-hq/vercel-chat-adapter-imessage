@@ -295,12 +295,15 @@ function makeReaction(id: string, space: MockSpace): MockMessage {
   );
 }
 
-function cloudAdapter(): iMessageAdapter {
+function cloudAdapter(
+  overrides: Partial<ConstructorParameters<typeof iMessageAdapter>[0]> = {}
+): iMessageAdapter {
   return new iMessageAdapter({
     local: false,
     logger: mockLogger,
     projectId: "proj",
     projectSecret: "secret",
+    ...overrides,
   });
 }
 
@@ -752,6 +755,96 @@ describe("handleWebhook", () => {
     expect(message.text).toBe("Photo");
     expect(message.attachments).toHaveLength(1);
     expect(message.attachments[0].type).toBe("image");
+  });
+
+  it("accepts a webhook verified by a trusted forwarder", async () => {
+    const webhookVerifier = vi.fn(async () => true);
+    const adapter = cloudAdapter({ webhookVerifier });
+    await init(adapter);
+    const request = new Request("https://example.com/api/imessage/webhook", {
+      method: "POST",
+      headers: { "x-spectrum-event": "messages" },
+      body: JSON.stringify(textMessagePayload()),
+    });
+
+    const response = await adapter.handleWebhook(request);
+
+    expect(response.status).toBe(200);
+    expect(webhookVerifier).toHaveBeenCalledWith(
+      request,
+      JSON.stringify(textMessagePayload())
+    );
+    expect(mockChat.processMessage).toHaveBeenCalledOnce();
+  });
+
+  it("prefers a trusted forwarder verifier over the native secret", async () => {
+    const webhookVerifier = vi.fn(async () => true);
+    const adapter = cloudAdapter({
+      webhookSecret: "wrong-secret",
+      webhookVerifier,
+    });
+    await init(adapter);
+
+    const response = await adapter.handleWebhook(
+      signedWebhookRequest({ body: textMessagePayload() })
+    );
+
+    expect(response.status).toBe(200);
+    expect(webhookVerifier).toHaveBeenCalledOnce();
+  });
+
+  it("uses a replacement body returned by a trusted verifier", async () => {
+    const replacement = textMessagePayload({ text: "verified replacement" });
+    const adapter = cloudAdapter({
+      webhookVerifier: async () => JSON.stringify(replacement),
+    });
+    await init(adapter);
+
+    const response = await adapter.handleWebhook(
+      signedWebhookRequest({ body: textMessagePayload() })
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockChat.processMessage).toHaveBeenCalledWith(
+      adapter,
+      "imessage:iMessage;-;+1234567890",
+      expect.objectContaining({ text: "verified replacement" }),
+      undefined
+    );
+  });
+
+  it.each([
+    false,
+    null,
+    undefined,
+    "",
+    0,
+  ])("rejects a forwarded webhook when its verifier returns %s", async (result) => {
+    const adapter = cloudAdapter({ webhookVerifier: async () => result });
+    await init(adapter);
+
+    const response = await adapter.handleWebhook(
+      signedWebhookRequest({ body: textMessagePayload() })
+    );
+
+    expect(response.status).toBe(401);
+    expect(mockChat.processMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects a forwarded webhook when its verifier throws", async () => {
+    const adapter = cloudAdapter({
+      webhookVerifier: async () => {
+        throw new Error("untrusted");
+      },
+    });
+    await init(adapter);
+
+    const response = await adapter.handleWebhook(
+      signedWebhookRequest({ body: textMessagePayload() })
+    );
+
+    expect(response.status).toBe(401);
+    expect(mockChat.processMessage).not.toHaveBeenCalled();
   });
 
   it("rejects a bad signature with 401", async () => {
@@ -2010,7 +2103,7 @@ describe("addReaction / removeReaction", () => {
     await expect(
       adapter.addReaction("imessage:iMessage;-;+1234567890", "msg-001", "fire")
     ).rejects.toThrow(
-      'Supported: heart, love, thumbs_up, like, thumbs_down, dislike, laugh, exclamation, emphasize, question'
+      "Supported: heart, love, thumbs_up, like, thumbs_down, dislike, laugh, exclamation, emphasize, question"
     );
   });
 
@@ -2558,24 +2651,21 @@ describe("createiMessageAdapter", () => {
     ["partial", { projectId: undefined, projectSecret: "lazy-secret" }],
     ["undefined", undefined],
     ["null", null],
-  ])(
-    "rejects a %s provider result instead of falling back to other auth",
-    async (_, providerResult) => {
-      const credentials = vi.fn(async () => providerResult);
-      const adapter = createiMessageAdapter({
-        credentials: credentials as never,
-        projectId: "static-project",
-        projectSecret: "static-secret",
-        serverUrl: "grpc.example.com:443",
-        apiKey: "self-host-token",
-      });
+  ])("rejects a %s provider result instead of falling back to other auth", async (_, providerResult) => {
+    const credentials = vi.fn(async () => providerResult);
+    const adapter = createiMessageAdapter({
+      credentials: credentials as never,
+      projectId: "static-project",
+      projectSecret: "static-secret",
+      serverUrl: "grpc.example.com:443",
+      apiKey: "self-host-token",
+    });
 
-      await expect(init(adapter)).rejects.toThrow(
-        "The credential provider must return both projectId and projectSecret."
-      );
-      expect(mockSpectrum).not.toHaveBeenCalled();
-    }
-  );
+    await expect(init(adapter)).rejects.toThrow(
+      "The credential provider must return both projectId and projectSecret."
+    );
+    expect(mockSpectrum).not.toHaveBeenCalled();
+  });
 
   it("shares one lazy credential lookup across concurrent initialization", async () => {
     const credentials = vi.fn(async () => ({

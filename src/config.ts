@@ -18,6 +18,17 @@ export type iMessageCredentialProvider = () =>
   | Promise<SpectrumCloudCredentials>
   | SpectrumCloudCredentials;
 
+/**
+ * Verifies an inbound webhook that was authenticated by a trusted forwarding
+ * service. Throwing or returning a falsy value rejects the request. A returned
+ * string replaces the body used for parsing; any other truthy value accepts the
+ * original body.
+ */
+export type iMessageWebhookVerifier = (
+  request: Request,
+  rawBody: string
+) => unknown | Promise<unknown>;
+
 export interface iMessageAdapterConfig {
   /** Legacy self-host token. Mapped to a `clients` entry's `token`. */
   apiKey?: string;
@@ -41,6 +52,8 @@ export interface iMessageAdapterConfig {
   serverUrl?: string;
   /** Per-webhook signing secret for verifying Spectrum Cloud deliveries. */
   webhookSecret?: string;
+  /** Trusted-forwarder verifier. Takes precedence over `webhookSecret`. */
+  webhookVerifier?: iMessageWebhookVerifier;
 }
 
 /** @deprecated Use {@link iMessageAdapterConfig}. */
@@ -65,6 +78,8 @@ export interface CreateiMessageAdapterOptions {
   projectSecret?: string;
   serverUrl?: string;
   webhookSecret?: string;
+  /** Trusted-forwarder verifier. Takes precedence over `webhookSecret`. */
+  webhookVerifier?: iMessageWebhookVerifier;
 }
 
 const URL_SCHEME_RE = /^[a-z][a-z0-9+.-]*:\/\//i;

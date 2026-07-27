@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { Message } from "chat";
 import type { Content as SpectrumContent } from "@spectrum-ts/core";
+import type { Message } from "chat";
+import type { iMessageWebhookVerifier } from "../config";
 import { buildChatMessageFromFields } from "./inbound";
 
 /**
@@ -47,6 +48,66 @@ export interface SpectrumWebhookPayload {
 export type SignatureVerification =
   | { ok: true }
   | { ok: false; reason: string; status: number };
+
+export type WebhookVerification =
+  | { ok: true; body: string }
+  | { ok: false; reason: string; status: number; cause?: unknown };
+
+export type WebhookRequestVerifier = (
+  request: Request,
+  rawBody: string
+) => Promise<WebhookVerification>;
+
+/**
+ * Normalize native signature verification and trusted-forwarder verification
+ * behind one request-level strategy. A custom verifier takes precedence.
+ */
+export function createWebhookVerifier(options: {
+  secret?: string;
+  verifier?: iMessageWebhookVerifier;
+}): WebhookRequestVerifier | undefined {
+  const customVerifier = options.verifier;
+  if (customVerifier) {
+    return async (request, rawBody) => {
+      try {
+        const result = await customVerifier(request, rawBody);
+        if (!result) {
+          return {
+            ok: false,
+            reason: "webhook verification failed",
+            status: 401,
+          };
+        }
+        return {
+          ok: true,
+          body: typeof result === "string" ? result : rawBody,
+        };
+      } catch (cause) {
+        return {
+          ok: false,
+          reason: "webhook verification failed",
+          status: 401,
+          cause,
+        };
+      }
+    };
+  }
+
+  const secret = options.secret;
+  if (!secret) {
+    return;
+  }
+
+  return async (request, rawBody) => {
+    const verification = verifySpectrumSignature({
+      secret,
+      signature: request.headers.get(SPECTRUM_SIGNATURE_HEADER),
+      timestamp: request.headers.get(SPECTRUM_TIMESTAMP_HEADER),
+      rawBody,
+    });
+    return verification.ok ? { ok: true, body: rawBody } : verification;
+  };
+}
 
 /**
  * Verify a Spectrum Cloud webhook's HMAC-SHA256 signature.

@@ -93,5 +93,6 @@ export function createiMessageAdapter(
     apiKey,
     phone,
     webhookSecret,
+    webhookVerifier: config?.webhookVerifier,
   });
 }

@@ -65,12 +65,11 @@ import {
 } from "./internal/thread";
 import {
   buildChatMessageFromWebhook,
+  createWebhookVerifier,
   SPECTRUM_EVENT_HEADER,
   SPECTRUM_MESSAGES_EVENT,
-  SPECTRUM_SIGNATURE_HEADER,
-  SPECTRUM_TIMESTAMP_HEADER,
   type SpectrumWebhookPayload,
-  verifySpectrumSignature,
+  type WebhookRequestVerifier,
 } from "./internal/webhook";
 import { iMessageFormatConverter } from "./markdown";
 import { isAppUrl, type MiniAppCard, resolveMiniApp } from "./miniapp";
@@ -113,6 +112,7 @@ export class iMessageAdapter implements Adapter {
   private chat: ChatInstance | null = null;
   private readonly credentialProvider?: iMessageCredentialProvider;
   private readonly logger: Logger;
+  private readonly webhookRequestVerifier?: WebhookRequestVerifier;
   private readonly formatConverter = new iMessageFormatConverter();
   private readonly cache = new InboundCache();
   private readonly modals = new ModalPollRegistry();
@@ -141,6 +141,10 @@ export class iMessageAdapter implements Adapter {
     // (createiMessageAdapter trims it): a stray space would otherwise fail
     // signature verification only on the constructor path.
     this.webhookSecret = config.webhookSecret?.trim();
+    this.webhookRequestVerifier = createWebhookVerifier({
+      secret: this.webhookSecret,
+      verifier: config.webhookVerifier,
+    });
   }
 
   async initialize(chat: ChatInstance): Promise<void> {
@@ -228,27 +232,26 @@ export class iMessageAdapter implements Adapter {
     if (!this.chat) {
       return new Response("Chat instance not initialized", { status: 500 });
     }
-    if (!this.webhookSecret) {
+    if (!this.webhookRequestVerifier) {
       return new Response(
-        "Webhook signing secret not configured (set IMESSAGE_WEBHOOK_SECRET)",
+        "Webhook verification not configured (set IMESSAGE_WEBHOOK_SECRET or supply webhookVerifier)",
         { status: 500 }
       );
     }
 
-    // Read the raw body BEFORE parsing: the signature covers the exact bytes.
+    // Read the raw body BEFORE parsing: verifiers receive the exact bytes.
     const rawBody = await request.text();
-    const verdict = verifySpectrumSignature({
-      secret: this.webhookSecret,
-      signature: request.headers.get(SPECTRUM_SIGNATURE_HEADER),
-      timestamp: request.headers.get(SPECTRUM_TIMESTAMP_HEADER),
-      rawBody,
-    });
-    if (!verdict.ok) {
+    const verification = await this.webhookRequestVerifier(request, rawBody);
+    if (!verification.ok) {
       this.logger.warn("Rejected iMessage webhook delivery", {
-        reason: verdict.reason,
+        reason: verification.reason,
+        ...(verification.cause === undefined
+          ? {}
+          : { error: String(verification.cause) }),
       });
-      return new Response(verdict.reason, { status: verdict.status });
+      return new Response(verification.reason, { status: verification.status });
     }
+    const verifiedBody = verification.body;
 
     const event = request.headers.get(SPECTRUM_EVENT_HEADER);
     if (event && event !== SPECTRUM_MESSAGES_EVENT) {
@@ -258,7 +261,7 @@ export class iMessageAdapter implements Adapter {
 
     let payload: SpectrumWebhookPayload;
     try {
-      payload = JSON.parse(rawBody) as SpectrumWebhookPayload;
+      payload = JSON.parse(verifiedBody) as SpectrumWebhookPayload;
     } catch {
       return new Response("Invalid JSON body", { status: 400 });
     }
