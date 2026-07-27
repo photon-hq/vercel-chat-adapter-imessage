@@ -25,7 +25,7 @@ export type iMessageCredentialProvider = () =>
 export type iMessageWebhookVerifier = (
   request: Request,
   rawBody: string
-) => unknown | Promise<unknown>;
+) => boolean | Promise<boolean>;
 
 export interface iMessageAdapterConfig {
   /** Legacy self-host token. Mapped to a `clients` entry's `token`. */

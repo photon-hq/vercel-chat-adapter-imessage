@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { Message } from "chat";
 import type { Content as SpectrumContent } from "@spectrum-ts/core";
+import type { Message } from "chat";
+import type { iMessageWebhookVerifier } from "../config";
 import { buildChatMessageFromFields } from "./inbound";
 
 /**
@@ -44,9 +45,53 @@ export interface SpectrumWebhookPayload {
   space: SpectrumWebhookSpace;
 }
 
-export type SignatureVerification =
+export type WebhookVerification =
   | { ok: true }
   | { ok: false; reason: string; status: number };
+
+export type WebhookRequestVerifier = (
+  request: Request,
+  rawBody: string
+) => Promise<WebhookVerification>;
+
+/**
+ * Normalize native signature verification and trusted-forwarder verification
+ * behind one request-level strategy. A custom verifier takes precedence.
+ */
+export function createWebhookVerifier(options: {
+  secret?: string;
+  verifier?: iMessageWebhookVerifier;
+}): WebhookRequestVerifier | undefined {
+  const customVerifier = options.verifier;
+  if (customVerifier) {
+    return async (request, rawBody) => {
+      try {
+        return (await customVerifier(request, rawBody))
+          ? { ok: true }
+          : { ok: false, reason: "webhook verification failed", status: 401 };
+      } catch {
+        return {
+          ok: false,
+          reason: "webhook verification failed",
+          status: 401,
+        };
+      }
+    };
+  }
+
+  const secret = options.secret;
+  if (!secret) {
+    return;
+  }
+
+  return async (request, rawBody) =>
+    verifySpectrumSignature({
+      secret,
+      signature: request.headers.get(SPECTRUM_SIGNATURE_HEADER),
+      timestamp: request.headers.get(SPECTRUM_TIMESTAMP_HEADER),
+      rawBody,
+    });
+}
 
 /**
  * Verify a Spectrum Cloud webhook's HMAC-SHA256 signature.
@@ -61,7 +106,7 @@ export function verifySpectrumSignature(opts: {
   secret: string;
   signature: string | null;
   timestamp: string | null;
-}): SignatureVerification {
+}): WebhookVerification {
   const { rawBody, secret, signature, timestamp } = opts;
   if (!(signature && timestamp)) {
     return { ok: false, status: 400, reason: "missing signature headers" };
