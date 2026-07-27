@@ -247,7 +247,7 @@ export class iMessageAdapter implements Adapter {
         reason: verification.reason,
         ...(verification.cause === undefined
           ? {}
-          : { error: verification.cause }),
+          : { error: String(verification.cause) }),
       });
       return new Response(verification.reason, { status: verification.status });
     }

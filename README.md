@@ -118,7 +118,7 @@ export async function POST(request: Request): Promise<Response> {
 }
 ```
 
-`bot.webhooks.imessage` calls the adapter's `handleWebhook`: it verifies the signature, parses the `messages` event, and routes the message into your bot. When a trusted gateway verifies Photon before forwarding, pass `webhookVerifier`; it receives the request and exact raw body and takes precedence over `webhookSecret`. Return a falsy value or throw to reject, a string to parse that verified replacement body, or any other truthy value to accept the original body. Processing runs in the background via `waitUntil`, so the endpoint acknowledges immediately. Spectrum Cloud retries failed deliveries with backoff and delivers at-least-once — dedupe on `X-Spectrum-Webhook-Id` + `message.id` if you need exactly-once side effects.
+`bot.webhooks.imessage` calls the adapter's `handleWebhook`: it verifies the delivery, parses the `messages` event, and routes the message into your bot. When a trusted gateway verifies Photon before forwarding, pass `webhookVerifier`; it receives the request and exact raw body and takes precedence over `webhookSecret`. Return a falsy value or throw to reject, a string to parse that verified replacement body, or any other truthy value to accept the original body. Processing runs in the background via `waitUntil`, so the endpoint acknowledges immediately. Spectrum Cloud retries failed deliveries with backoff and delivers at-least-once — dedupe on `X-Spectrum-Webhook-Id` + `message.id` if you need exactly-once side effects.
 
 ### Replying
 
