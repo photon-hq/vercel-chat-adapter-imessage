@@ -26,10 +26,10 @@
     "clean": "rm -rf dist coverage"
   },
   "peerDependencies": {
-    "chat": "^4.14.0"
+    "chat": "^4.38.0"
   },
   "dependencies": {
-    "@chat-adapter/shared": "^4.32.0",
+    "@chat-adapter/shared": "^4.38.0",
     "@spectrum-ts/core": "10.0.0",
     "@spectrum-ts/imessage": "10.0.0",
     "mime-types": "^3.0.2"
@@ -39,7 +39,7 @@
     "@types/mime-types": "^3.0.1",
     "@types/node": "^22.20.0",
     "@vitest/coverage-v8": "^4.1.9",
-    "chat": "^4.32.0",
+    "chat": "^4.38.0",
     "clean-publish": "^7.1.0",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",

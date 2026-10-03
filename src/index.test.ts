@@ -83,7 +83,7 @@ vi.mock("chat", async (importOriginal) => {
 import { createHmac } from "node:crypto";
 import { ValidationError } from "@chat-adapter/shared";
 import type { ModalElement } from "chat";
-import { NotImplementedError } from "chat";
+import { Message, NotImplementedError } from "chat";
 import { createiMessageAdapter, deriveAddress, iMessageAdapter } from "./index";
 
 // Every gateway listener leaves a long `waitUntil` timer + a live message pump
@@ -669,6 +669,7 @@ describe("handleWebhook", () => {
       expect.any(String),
       expect.objectContaining({
         text: "inline answer",
+        replyTo: undefined,
         raw: expect.objectContaining({
           content: expect.objectContaining({
             target: expect.objectContaining({ id: "original-1" }),
@@ -677,6 +678,46 @@ describe("handleWebhook", () => {
       }),
       undefined
     );
+  });
+
+  it.each([
+    "inbound",
+    "outbound",
+  ] as const)("normalizes an inline reply's %s target from webhook JSON", async (direction) => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+    const timestamp = "2026-05-14T19:00:00.000Z";
+
+    await adapter.handleWebhook(
+      signedWebhookRequest({
+        body: textMessagePayload({
+          content: {
+            type: "reply",
+            target: {
+              id: "original-1",
+              content: { type: "text", text: "Should I use blue?" },
+              direction,
+              sender: { id: "+15550101" },
+              timestamp,
+            },
+            content: { type: "text", text: "yes" },
+          },
+        }),
+      })
+    );
+
+    const message = mockChat.processMessage.mock.calls[0]?.[2] as Message;
+    expect(message.text).toBe("yes");
+    expect(message.replyTo).toMatchObject({
+      id: "original-1",
+      threadId: message.threadId,
+      text: "Should I use blue?",
+      author: { userId: "+15550101", isMe: direction === "outbound" },
+      metadata: { dateSent: new Date(timestamp) },
+    });
+    const restored = Message.fromJSON(JSON.parse(JSON.stringify(message)));
+    expect(restored.replyTo?.text).toBe("Should I use blue?");
+    expect(restored.replyTo?.metadata.dateSent).toEqual(new Date(timestamp));
   });
 
   it("unwraps attachments from inline replies", async () => {
@@ -1113,6 +1154,47 @@ describe("startGatewayListener", () => {
       "imessage:iMessage;-;+1234567890",
       expect.objectContaining({ text: "hi" }),
       expect.anything()
+    );
+  });
+
+  it("normalizes a gateway reply target before dispatch and serialization", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const space = Object.assign(makeSpace("iMessage;-;+1234567890"), {
+      phone: "+15550100",
+    });
+    const target = makeMessage(
+      "original-1",
+      space,
+      { type: "text", text: "Should I use blue?" },
+      { direction: "outbound", sender: "+15550100" }
+    );
+    await startTrackedListener(adapter);
+    pushInbound([
+      space,
+      makeMessage("answer-1", space, {
+        type: "reply",
+        target,
+        content: { type: "text", text: "yes" },
+      }),
+    ]);
+    await vi.waitFor(() => {
+      expect(mockChat.processMessage).toHaveBeenCalledOnce();
+    });
+
+    const message = mockChat.processMessage.mock.calls[0]?.[2] as Message;
+    expect(message.text).toBe("yes");
+    expect(message.replyTo).toMatchObject({
+      id: "original-1",
+      threadId: message.threadId,
+      text: "Should I use blue?",
+      author: { userId: "+15550100", isMe: true },
+      metadata: { dateSent: target.timestamp },
+    });
+    const restored = Message.fromJSON(JSON.parse(JSON.stringify(message)));
+    expect(restored.replyTo?.text).toBe("Should I use blue?");
+    expect(restored.replyTo?.threadId).toBe(
+      "imessage:iMessage;-;+1234567890~+15550100"
     );
   });
 
@@ -2327,6 +2409,77 @@ describe("parseMessage", () => {
     expect(message.author.userId).toBe("+1987654321");
     expect(message.threadId).toBe("imessage:iMessage;-;+1987654321");
     expect(message.isMention).toBe(true);
+    expect(message.replyTo).toBeUndefined();
+  });
+
+  it("keeps quoted attachments separate from the reply's attachments", () => {
+    const adapter = cloudAdapter();
+    const space = makeSpace("iMessage;-;+1234567890");
+    const target = makeMessage("original-1", space, {
+      type: "attachment",
+      name: "photo.jpg",
+      mimeType: "image/jpeg",
+      size: 123,
+    });
+    const message = adapter.parseMessage(
+      makeMessage("answer-1", space, {
+        type: "reply",
+        target,
+        content: { type: "text", text: "Nice photo" },
+      })
+    );
+    expect(message.attachments).toEqual([]);
+    expect(message.replyTo?.attachments).toEqual([
+      expect.objectContaining({ name: "photo.jpg", type: "image" }),
+    ]);
+  });
+
+  it.each([
+    undefined,
+    "invalid-date",
+    new Date(Number.NaN),
+  ])("keeps a reply serializable with an absent or invalid target timestamp (%s)", (timestamp) => {
+    const adapter = cloudAdapter();
+    const space = makeSpace("iMessage;-;+1234567890");
+    const target = {
+      ...makeMessage("original-1", space, {
+        type: "text",
+        text: "Should I use blue?",
+      }),
+      timestamp,
+    };
+    const raw = makeMessage("answer-1", space, {
+      type: "reply",
+      target,
+      content: { type: "text", text: "yes" },
+    });
+    const message = adapter.parseMessage(raw);
+    expect(message.replyTo?.metadata.dateSent).toEqual(raw.timestamp);
+    expect(() => message.toJSON()).not.toThrow();
+  });
+
+  it("does not recurse through a target's own reply references", () => {
+    const adapter = cloudAdapter();
+    const space = makeSpace("iMessage;-;+1234567890");
+    const target = makeMessage("original-1", space, {
+      type: "text",
+      text: "hi",
+    });
+    target.content = {
+      type: "reply",
+      target,
+      content: { type: "text", text: "Earlier reply" },
+    };
+    const message = adapter.parseMessage(
+      makeMessage("answer-1", space, {
+        type: "reply",
+        target,
+        content: { type: "text", text: "yes" },
+      })
+    );
+    expect(message.replyTo?.text).toBe("Earlier reply");
+    expect(message.replyTo?.replyTo).toBeUndefined();
+    expect(message.toJSON().replyTo?.replyTo).toBeUndefined();
   });
 
   it("sets isMention false for group chats and surfaces attachments", () => {

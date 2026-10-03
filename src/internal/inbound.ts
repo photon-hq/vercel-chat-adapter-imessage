@@ -25,7 +25,8 @@ export interface InboundMessageFields {
 
 /** Build the Chat SDK `Message` from already-normalized inbound fields. */
 export function buildChatMessageFromFields(
-  fields: InboundMessageFields
+  fields: InboundMessageFields,
+  includeReplyTo = true
 ): Message {
   const text = extractText(fields.content);
 
@@ -53,7 +54,48 @@ export function buildChatMessageFromFields(
     })),
     raw: fields.raw,
     isMention: isDMChatGuid(fields.chatGuid),
+    replyTo: includeReplyTo ? extractReplyTo(fields) : undefined,
   });
+}
+
+function extractReplyTo(fields: InboundMessageFields): Message | undefined {
+  if (fields.content.type !== "reply") {
+    return;
+  }
+
+  // Gateway targets are live Messages; webhook targets are JSON snapshots.
+  const target: Pick<
+    SpectrumMessage,
+    "id" | "content" | "sender" | "direction"
+  > & {
+    space?: { id: string; phone?: string };
+    timestamp?: Date | string;
+  } = fields.content.target;
+  if (!(target?.id && target.content)) {
+    return;
+  }
+  const timestamp =
+    typeof target.timestamp === "string"
+      ? new Date(target.timestamp)
+      : target.timestamp;
+
+  return buildChatMessageFromFields(
+    {
+      id: target.id,
+      chatGuid: target.space?.id ?? fields.chatGuid,
+      phone: target.space?.phone ?? fields.phone,
+      content: target.content,
+      senderId: target.sender?.id ?? "",
+      isOutbound: target.direction === "outbound",
+      timestamp:
+        timestamp && Number.isFinite(timestamp.getTime())
+          ? timestamp
+          : fields.timestamp,
+      raw: target,
+    },
+    // Keep only the immediate target, including when provider references cycle.
+    false
+  );
 }
 
 /** Build the Chat SDK `Message` the adapter surfaces from a spectrum-ts Message. */

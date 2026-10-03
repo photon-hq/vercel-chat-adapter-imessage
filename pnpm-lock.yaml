@@ -13,8 +13,8 @@ importers:
   .:
     dependencies:
       '@chat-adapter/shared':
-        specifier: ^4.32.0
-        version: 4.32.0(zod@4.4.3)
+        specifier: ^4.38.0
+        version: 4.38.0(zod@4.4.3)
       '@spectrum-ts/core':
         specifier: 10.0.0
         version: 10.0.0(typescript@5.9.3)
@@ -38,8 +38,8 @@ importers:
         specifier: ^4.1.9
         version: 4.1.9(vitest@4.1.9)
       chat:
-        specifier: ^4.32.0
-        version: 4.32.0(zod@4.4.3)
+        specifier: ^4.38.0
+        version: 4.38.0(zod@4.4.3)
       clean-publish:
         specifier: ^7.1.0
         version: 7.1.0
@@ -142,8 +142,8 @@ packages:
   '@bufbuild/protobuf@2.12.1':
     resolution: {integrity: sha512-BvAMfS6LrgZiryOAZ4pBYucu4wG/Ei/9o9DZ9akbREnMLbPJiom2i8b9C8IsKErQoiKqVhrerzt3kOT/RrzLHg==}
 
-  '@chat-adapter/shared@4.32.0':
-    resolution: {integrity: sha512-ANXYe2dbSmr9A+yUAnV8TfFht4GM6f3zR5LnAYtQdNnRI9CJfXIUXuhRaVBe5RD8IEgGXyGi4BKj5qdjBtUumA==}
+  '@chat-adapter/shared@4.38.0':
+    resolution: {integrity: sha512-mBOAVJ18eB1w8yOEhVRfQGvR0ALg/VawndP/mht4Da3xXJQIiwUid8v/G+wm9XuQieJyIG4JL9dIUed4YUHDdQ==}
     engines: {node: '>=20'}
 
   '@clack/core@1.4.2':
@@ -775,14 +775,17 @@ packages:
   chardet@2.2.0:
     resolution: {integrity: sha512-rddelWYNPRrXq6PtNEN2S3f6t9ILzvqaN5pVgi4kqt9jHQaXIial9PznB5iSPVlQSLNaaH22ItWz3EJtQ10+OA==}
 
-  chat@4.32.0:
-    resolution: {integrity: sha512-0NlJcCLycTy8kytRsZEnW4Gzomm+SNh1Yg7y9GVYB5fTjyhOxCcnzqrythgXNn2dvv7VeihDIISpNU0WZdOKKg==}
+  chat@4.38.0:
+    resolution: {integrity: sha512-begN9W19/kSfMPz7hl0q8CNufs6TE7ddvIERhBPjShxWRvwI6+KGVGlr9cJsNoppjE3JywvHUYUuifZa5uj6IA==}
     engines: {node: '>=20'}
     peerDependencies:
-      ai: ^6.0.182
+      ai: ^6.0.182 || ^7.0.0
+      workflow: ^5.0.0-beta.35
       zod: ^3.0.0 || ^4.0.0
     peerDependenciesMeta:
       ai:
+        optional: true
+      workflow:
         optional: true
       zod:
         optional: true
@@ -1674,12 +1677,13 @@ snapshots:
 
   '@bufbuild/protobuf@2.12.1': {}
 
-  '@chat-adapter/shared@4.32.0(zod@4.4.3)':
+  '@chat-adapter/shared@4.38.0(zod@4.4.3)':
     dependencies:
-      chat: 4.32.0(zod@4.4.3)
+      chat: 4.38.0(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - supports-color
+      - workflow
       - zod
 
   '@clack/core@1.4.2':
@@ -2211,7 +2215,7 @@ snapshots:
 
   chardet@2.2.0: {}
 
-  chat@4.32.0(zod@4.4.3):
+  chat@4.38.0(zod@4.4.3):
     dependencies:
       '@workflow/serde': 4.1.0-beta.2
       mdast-util-to-string: 4.0.0

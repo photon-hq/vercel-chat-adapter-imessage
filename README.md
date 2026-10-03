@@ -235,6 +235,7 @@ IMESSAGE_WEBHOOK_SECRET=whsec_...               # per-webhook signing secret
 | Chat background | Yes (`setBackground`) |
 | Modals | Limited |
 | Fetch single message | Yes (`fetchMessage`) |
+| Incoming reply context | Yes (`message.replyTo`, when Spectrum includes the target content) |
 | Message history | No |
 | Thread/chat info | No |
 | Cards | Mini-app cards only (`sendMiniApp`) |
