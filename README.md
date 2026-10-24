@@ -106,17 +106,77 @@ IMESSAGE_WEBHOOK_SECRET=whsec_...
 
 ### 3. Create the webhook route
 
+Build the bot lazily so a missing credential fails the request with a clear
+500 instead of crashing `next build` or a cold start during module
+evaluation — `createiMessageAdapter()` throws a `ValidationError` when no
+cloud or self-host credentials are present, even on a receive-only route:
+
+```typescript
+// lib/bot.ts
+import { Chat } from "chat";
+import { createiMessageAdapter } from "@photon-ai/chat-adapter-imessage";
+
+let bot: Chat | undefined;
+
+export function getBot(): Chat {
+  bot ??= new Chat({
+    userName: "mybot",
+    adapters: {
+      imessage: createiMessageAdapter({
+        projectId: process.env.IMESSAGE_PROJECT_ID,
+        projectSecret: process.env.IMESSAGE_PROJECT_SECRET,
+      }),
+    },
+  });
+  return bot;
+}
+```
+
 ```typescript
 // app/api/imessage/webhook/route.ts
 import { after } from "next/server";
-import { bot } from "@/lib/bot";
+import { getBot } from "@/lib/bot";
 
 export async function POST(request: Request): Promise<Response> {
+  let bot: ReturnType<typeof getBot>;
+  try {
+    bot = getBot();
+  } catch {
+    // Missing IMESSAGE_PROJECT_ID / IMESSAGE_PROJECT_SECRET (or the
+    // self-host pair). Fix the environment, don't hand-roll verification.
+    return new Response("iMessage adapter not configured", { status: 500 });
+  }
   return bot.webhooks.imessage(request, {
     waitUntil: (task) => after(() => task),
   });
 }
 ```
+
+Always verify through the official adapter (`bot.webhooks.imessage` /
+`adapter.handleWebhook`) — it checks the `X-Spectrum-Signature` HMAC against
+`IMESSAGE_WEBHOOK_SECRET` (or your `webhookVerifier` for trusted forwarders)
+and returns a descriptive 500 when verification isn't configured. Never write
+your own signature check: the handler must read the exact raw body before
+parsing, and getting that wrong silently accepts forgeries or rejects real
+deliveries. Required variables: `IMESSAGE_PROJECT_ID` +
+`IMESSAGE_PROJECT_SECRET` (cloud) and `IMESSAGE_WEBHOOK_SECRET` (webhooks).
+
+### Production notes
+
+- **A 200 acknowledgment is not completed work.** The route returns 200 once
+  the delivery verifies; your handlers keep running via `waitUntil`. A 200
+does not mean a reply was posted.
+- **Retries are at-least-once.** Spectrum Cloud retries failed deliveries —
+  dedupe on `X-Spectrum-Webhook-Id` + `message.id` if you need exactly-once
+  side effects.
+- **Provider acceptance is not handset delivery.** A stored outbound message
+  ID proves Spectrum accepted the send, not that a phone displayed it.
+- **Separate transit latency from app latency.** Compare when the webhook
+  arrived at your route against when your app persisted the message: time
+  spent before arrival is upstream delivery, not handler slowness.
+
+For the full delivery, retry, and verification reference, see the
+[webhook docs](https://photon.codes/docs/webhooks/overview).
 
 `bot.webhooks.imessage` calls the adapter's `handleWebhook`: it verifies the delivery, parses the `messages` event, and routes the message into your bot. When a trusted gateway verifies Photon before forwarding, pass `webhookVerifier`; it receives the request and exact raw body and takes precedence over `webhookSecret`. Return a falsy value or throw to reject, a string to parse that verified replacement body, or any other truthy value to accept the original body. Processing runs in the background via `waitUntil`, so the endpoint acknowledges immediately. Spectrum Cloud retries failed deliveries with backoff and delivers at-least-once — dedupe on `X-Spectrum-Webhook-Id` + `message.id` if you need exactly-once side effects.
 
