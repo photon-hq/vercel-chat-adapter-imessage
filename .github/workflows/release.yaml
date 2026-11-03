@@ -3,23 +3,55 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Verify and pack only, publish staging, or promote a stored candidate
+        type: choice
+        options: [dry-run, stage, promote]
+        default: dry-run
+      staging-version:
+        description: Staging version to promote; blank uses the current staging tag
+        type: string
+        default: ""
 
 permissions:
-  contents: write
-  pull-requests: read
-  id-token: write
-  # Required by buildspace typescript-service-release's github-packages-publish
-  # job (permission is validated at workflow start even when the job is skipped).
-  packages: write
+  contents: read
 
 jobs:
-  release:
-    uses: photon-hq/buildspace/.github/workflows/typescript-service-release.yaml@main
+  stage:
+    if: github.event_name == 'push' || inputs.operation == 'dry-run' || inputs.operation == 'stage'
+    uses: photon-hq/buildspace/.github/workflows/package-stage.yml@c1fb06e4ae457a8e053642a914bd37b8f5ce9e1b
+    permissions:
+      contents: write
+      pull-requests: read
+      id-token: write
+      packages: write
+      actions: read
+      attestations: write
     with:
-      service-name: chat-adapter-imessage
-      working-directory: .
-      build-command: "bun run build"
-      publish-command: "bunx clean-publish --package-manager npm"
-      use-oidc: true
-      dry-run: false
-    secrets: inherit
+      package: "@photon-ai/chat-adapter-imessage"
+      registry: https://registry.npmjs.org
+      environment: staging
+      install: pnpm install --frozen-lockfile
+      verify: |
+        pnpm run typecheck
+        pnpm test
+        pnpm run build
+      pack: node scripts/pack.mjs
+      dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'dry-run' }}
+
+  promote:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'promote' && github.ref == 'refs/heads/main'
+    uses: photon-hq/buildspace/.github/workflows/package-promote.yml@c1fb06e4ae457a8e053642a914bd37b8f5ce9e1b
+    permissions:
+      contents: write
+      packages: write
+      actions: read
+      attestations: read
+      id-token: write
+    with:
+      package: "@photon-ai/chat-adapter-imessage"
+      registry: https://registry.npmjs.org
+      environment: production
+      staging-version: ${{ inputs.staging-version }}
