@@ -431,6 +431,14 @@ This version re-platforms the adapter onto **spectrum-ts**. If you are upgrading
 
 - These are session-scoped. `deleteMessage` and `markRead` need the target message to have been seen this session (and delete is bound by iMessage's ~2-minute unsend window); `removeReaction` needs the tapback to have been added via `addReaction` this session. See [Limitations](#limitations).
 
+## Releases
+
+Every push to `main` runs the [Release workflow](.github/workflows/release.yaml) to type-check, test, build, and publish a staging candidate through the pinned [Buildspace package workflows](https://github.com/photon-hq/buildspace/tree/c1fb06e4ae457a8e053642a914bd37b8f5ce9e1b/.github/workflows). Manual dispatch defaults to `dry-run`, which verifies and packs both channels without publishing or creating tags or Releases. To release, dispatch `promote` from `main` with a staging version and obtain approval in the `production` environment. Promotion publishes the stored production candidate under npm's stable `latest` tag without rebuilding or committing a source version bump.
+
+The pack script preserves the existing `clean-publish` manifest cleanup in a temporary package copy and checks that the archive's file list contains every declared export, entry point, and type declaration. The source manifest and lockfile stay unchanged.
+
+The first staging run creates the `staging` environment. Before the first production promotion, a repository administrator must configure main-only deployment policies and at least one required reviewer on `production`; the Buildspace README setup command configures both environments. An npm administrator must [configure trusted publishing](https://docs.npmjs.com/trusted-publishers/) for `photon-hq/vercel-chat-adapter-imessage`, caller workflow `release.yaml`, and both environments, allowing `npm publish` and `npm dist-tag`. Publishing uses GitHub OIDC; keep any existing `NPM_TOKEN` secret until the first real promotion succeeds.
+
 ## License
 
 MIT
