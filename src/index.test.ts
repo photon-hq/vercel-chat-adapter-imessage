@@ -1381,6 +1381,96 @@ describe("postMessage", () => {
     expect(result.id).toBe("wh-reply-1");
   });
 
+  it.each([
+    ["+15550001111", "+15550002222", true],
+    ["+15550002222", "+15550001111", true],
+    ["+15550001111", "+15550002222", false],
+    ["+15550002222", "+15550001111", false],
+  ])("keeps replies on the requested line after %s switches to %s (line in thread: %s)", async (firstPhone, secondPhone, lineInThread) => {
+    const adapter = webhookAdapter();
+    await init(adapter);
+    const chatGuid = "iMessage;-;+1234567890";
+    const first = Object.assign(makeSpace(chatGuid, "dm", { id: "first" }), {
+      phone: firstPhone,
+    });
+    const second = Object.assign(makeSpace(chatGuid, "dm", { id: "second" }), {
+      phone: secondPhone,
+    });
+    const spaceResolver = vi.fn(
+      async (_id: string, params: { phone: string }) => {
+        if (params.phone === firstPhone) {
+          return first;
+        }
+        if (params.phone === secondPhone) {
+          return second;
+        }
+        throw new Error("Unexpected sending line");
+      }
+    );
+    mockImessage.mockReturnValue({ space: { get: spaceResolver } });
+
+    for (const [phone, expectedId] of [
+      [firstPhone, "first"],
+      [secondPhone, "second"],
+    ]) {
+      await adapter.handleWebhook(
+        signedWebhookRequest({ body: textMessagePayload({ chatGuid, phone }) })
+      );
+      const threadId = lineInThread
+        ? `imessage:${chatGuid}~${phone}`
+        : `imessage:${chatGuid}`;
+      const result = await adapter.postMessage(threadId, "Hi");
+      expect(result.id).toBe(expectedId);
+    }
+
+    expect(first.send).toHaveBeenCalledTimes(1);
+    expect(second.send).toHaveBeenCalledTimes(1);
+    expect(spaceResolver).toHaveBeenCalledWith(chatGuid, {
+      phone: secondPhone,
+    });
+
+    const result = await adapter.postMessage(
+      `imessage:${chatGuid}~${firstPhone}`,
+      "Delayed reply on the original line"
+    );
+    expect(result.id).toBe("first");
+    expect(first.send).toHaveBeenCalledTimes(2);
+    expect(second.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses a cached Space when its line matches the thread", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const chatGuid = "iMessage;-;+1234567890";
+    const phone = "+15550001111";
+    const space = Object.assign(makeSpace(chatGuid), { phone });
+    const spaceResolver = vi.fn(async () => space);
+    mockImessage.mockReturnValue({ space: { get: spaceResolver } });
+
+    await adapter.postMessage(`imessage:${chatGuid}~${phone}`, "First");
+    await adapter.postMessage(`imessage:${chatGuid}~${phone}`, "Second");
+
+    expect(spaceResolver).toHaveBeenCalledTimes(1);
+    expect(space.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("rebuilds a cached Space with an unknown line for a line-qualified thread", async () => {
+    const adapter = cloudAdapter();
+    await init(adapter);
+    const chatGuid = "iMessage;-;+1234567890";
+    const { space: cached } = await primeInbound(adapter, { chatGuid });
+    const phone = "+15550002222";
+    const rebuilt = Object.assign(makeSpace(chatGuid), { phone });
+    const spaceResolver = vi.fn(async () => rebuilt);
+    mockImessage.mockReturnValue({ space: { get: spaceResolver } });
+
+    await adapter.postMessage(`imessage:${chatGuid}~${phone}`, "Hi");
+
+    expect(cached.send).not.toHaveBeenCalled();
+    expect(spaceResolver).toHaveBeenCalledWith(chatGuid, { phone });
+    expect(rebuilt.send).toHaveBeenCalledOnce();
+  });
+
   it("posts a reply without initialize() by building the app on demand", async () => {
     // The reported production bug: eve's workflow reply callback (message.completed
     // → postMessage) runs in an invocation where initialize() never ran, so the
