@@ -913,8 +913,9 @@ export class iMessageAdapter implements Adapter {
     threadId: string
   ): Promise<SpectrumSpace | undefined> {
     const { chatGuid, phone: threadPhone } = decodeThreadId(threadId);
+    const phone = threadPhone ?? this.cache.getPhone(chatGuid);
     const cached = this.cache.getSpace(chatGuid);
-    if (cached) {
+    if (cached && (!phone || (cached as { phone?: string }).phone === phone)) {
       return cached;
     }
     await this.ensureApp();
@@ -922,9 +923,6 @@ export class iMessageAdapter implements Adapter {
       return;
     }
     try {
-      // Prefer the line from the thread ID (survives across invocations), then
-      // one learned from an inbound delivery in this process.
-      const phone = threadPhone ?? this.cache.getPhone(chatGuid);
       const spaces = this.platformSpaces();
       const space = phone
         ? await spaces.get(chatGuid, { phone })
