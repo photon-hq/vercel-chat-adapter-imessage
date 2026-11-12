@@ -433,4 +433,4 @@ This version re-platforms the adapter onto **spectrum-ts**. If you are upgrading
 
 ## License
 
-MIT
+Apache-2.0
