@@ -74,5 +74,5 @@
   "bugs": {
     "url": "https://github.com/photon-hq/vercel-chat-adapter-imessage/issues"
   },
-  "license": "MIT"
+  "license": "Apache-2.0"
 }
